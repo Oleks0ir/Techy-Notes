@@ -103,11 +103,12 @@ QSet<QPoint> inkCells(const Sheet &s, const Stroke &st, bool below) {
     return out;
 }
 
-void refresh(Sheet &s) {
+void refresh(Sheet &s, bool grow) {
     // ponytail: rescans all ink on every edit, keep per-stroke cells when big sheets lag
     QSet<QPoint> inked;
     for (const Stroke &st : s.strokes) inked |= inkCells(s, st);
-    s.pages |= inked;
+    if (grow) s.pages |= inked;
+    else inked &= s.pages;   // ink off the pages is not exported
     s.exportQueue.removeIf([&](QPoint c) { return !inked.contains(c); });
     QList<QPoint> fresh;
     for (QPoint c : inked)
@@ -140,8 +141,18 @@ bool canDeletePage(const Sheet &s, QPoint c) {
     return islands(rest) <= islands(s.pages);
 }
 
-bool exportPdf(const Sheet &s, const QString &path) {
-    if (s.exportQueue.isEmpty()) return false;
+void drawPage(QPainter &p, const Sheet &s, QPoint c) {
+    QRectF r = s.pageRect(c);
+    p.save();
+    p.translate(-r.topLeft());
+    p.setClipRect(r);
+    for (const Stroke &st : s.strokes)
+        if (bounds(st).intersects(r)) drawStroke(p, st);
+    p.restore();
+}
+
+bool exportPdf(const Sheet &s, const QList<QPoint> &pages, const QString &path) {
+    if (pages.isEmpty()) return false;
     QPdfWriter pdf(path);
     pdf.setCreator("Techy-Draw");
     pdf.setPageSize(QPageSize(s.page, QPageSize::Millimeter, {}, QPageSize::ExactMatch));
@@ -149,17 +160,10 @@ bool exportPdf(const Sheet &s, const QString &path) {
     QPainter p;
     if (!p.begin(&pdf)) return false;
     p.setRenderHint(QPainter::Antialiasing);
-    double k = pdf.resolution() / 25.4;   // device units per mm
-    for (int i = 0; i < s.exportQueue.size(); ++i) {
+    p.scale(pdf.resolution() / 25.4, pdf.resolution() / 25.4);   // mm
+    for (int i = 0; i < pages.size(); ++i) {
         if (i) pdf.newPage();
-        QRectF r = s.pageRect(s.exportQueue[i]);
-        p.save();
-        p.scale(k, k);
-        p.translate(-r.topLeft());
-        p.setClipRect(r);
-        for (const Stroke &st : s.strokes)
-            if (bounds(st).intersects(r)) drawStroke(p, st);
-        p.restore();
+        drawPage(p, s, pages[i]);
     }
     return p.end();
 }

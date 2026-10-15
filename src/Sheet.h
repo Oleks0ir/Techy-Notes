@@ -40,9 +40,10 @@ bool loadSheet(Sheet &s, const QString &path);         // false: unreadable or o
 // Cells holding the stroke's points, segments resampled every 2 mm (a diagonal's bbox corners do not count).
 // below: also the cell under each point that lies in the bottom third of its page (page growth while writing).
 QSet<QPoint> inkCells(const Sheet &s, const Stroke &st, bool below = false);
-void refresh(Sheet &s);                                // pages += cells with ink; queue drops emptied, appends newly inked
+void refresh(Sheet &s, bool grow = true);             // grow: pages += cells with ink. Queue = inked pages: drops emptied, appends newly inked
+void drawPage(QPainter &p, const Sheet &s, QPoint c);  // painter in mm with the page's top-left at the origin; ink clipped
 bool canDeletePage(const Sheet &s, QPoint c);          // an empty page, not the last, that leaves no new island
-bool exportPdf(const Sheet &s, const QString &path);   // exportQueue pages in order, ink clipped per page
+bool exportPdf(const Sheet &s, const QList<QPoint> &pages, const QString &path);   // one PDF page each, in order
 
 QDataStream &operator<<(QDataStream &d, const Pt &p);
 QDataStream &operator>>(QDataStream &d, Pt &p);

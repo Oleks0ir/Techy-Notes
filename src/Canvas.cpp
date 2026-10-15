@@ -1,7 +1,9 @@
 #include "Canvas.h"
+#include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
 #include <QMessageBox>
+#include <QMenu>
 #include <QMimeData>
 #include <QGuiApplication>
 #include <QPainter>
@@ -15,9 +17,18 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
     setAttribute(Qt::WA_AcceptTouchEvents);
     setTabletTracking(true);   // pen hover: palm rejection, "+" buttons
     setMouseTracking(true);    // mouse hover: "+" buttons
+    setFocusPolicy(Qt::ClickFocus);
     settle.setSingleShot(true);
     settle.setInterval(150);   // re-render this long after the last pan/zoom step
     connect(&settle, &QTimer::timeout, this, qOverload<>(&QWidget::update));
+    hold.setSingleShot(true);
+    hold.setInterval(500);
+    connect(&hold, &QTimer::timeout, this, [this] {   // armed: ring shown, the menu opens when the finger lifts
+        if (touchDrawing) cancel();   // finger drawing: drop what the press started
+        touchDrawing = false;
+        holdFired = true;
+        update();
+    });
     autosave.setSingleShot(true);
     autosave.setInterval(1000);
     connect(&autosave, &QTimer::timeout, this, &Canvas::save);
@@ -25,7 +36,7 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
 }
 
 void Canvas::modified() {
-    refresh(sheet);
+    refresh(sheet, autoPages);
     dirty = true;
     autosave.start();
 }
@@ -70,16 +81,35 @@ bool Canvas::event(QEvent *e) {
         plusOn = false;
         update();
     }
-    if (e->type() == QEvent::TouchCancel && touchDrawing) {
-        end();
+    if (e->type() == QEvent::TouchCancel) {
+        hold.stop();
+        holdFired = false;
+        if (touchDrawing) end();
         touchDrawing = false;
     }
     if (e->type() != QEvent::TouchBegin && e->type() != QEvent::TouchUpdate && e->type() != QEvent::TouchEnd)
         return QWidget::event(e);
+    if (QApplication::activePopupWidget()) {   // a menu is open: not ours, Qt turns it into a mouse click on the menu
+        e->ignore();
+        return false;
+    }
     // ponytail: palm rejection = ignore touch for 500 ms after any pen event; use proximity events if palms leak
     if (QDateTime::currentMSecsSinceEpoch() - lastPenMs < 500) return true;
     const auto *te = static_cast<QTouchEvent *>(e);
     const auto pts = te->points();
+    // one finger held still for 0.5 s, then lifted, opens the page menu. Not while held: once a menu is open,
+    // Qt turns the held finger into mouse events, and its lift closed the menu right away.
+    if (e->type() == QEvent::TouchBegin && pts.size() == 1) {
+        holdAt = pts[0].position();
+        holdFired = false;
+        hold.start();
+    } else if (te->isEndEvent() || pts.size() != 1 || QLineF(pts[0].position(), holdAt).length() > 10) {
+        hold.stop();
+        if (holdFired && te->isEndEvent() && pts.size() == 1 && QLineF(pts[0].position(), holdAt).length() <= 10)
+            QTimer::singleShot(0, this, [this] { pageMenu(holdAt); });   // after the lift is fully handled
+        if (holdFired) update();
+        holdFired = false;
+    }
     if (fingerDraws && (touchDrawing || (e->type() == QEvent::TouchBegin && pts.size() == 1))) {
         if (pts.size() == 1 && !te->isEndEvent()) {
             if (!touchDrawing && active == None) begin(pts[0].position(), 1, te->timestamp(), tool);
@@ -165,7 +195,7 @@ void Canvas::paintEvent(QPaintEvent *) {
     p.translate(offset);
     p.scale(scale, scale);
     QPoint ghost = focused() + QPoint(1, 0);   // the page right of the focused one; ink on it makes it real
-    if (sheet.pages.contains(focused()) && !sheet.pages.contains(ghost)) {
+    if (autoPages && sheet.pages.contains(focused()) && !sheet.pages.contains(ghost)) {
         p.setPen(QPen(QColor(0xd0, 0xd0, 0xd0), 0, Qt::DashLine));
         p.setBrush(QColor(255, 255, 255, 40));
         p.drawRect(sheet.pageRect(ghost));
@@ -186,8 +216,13 @@ void Canvas::paintEvent(QPaintEvent *) {
         if (active == Rect) p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
         else p.drawPolyline(lasso);
     }
+    p.resetTransform();
+    if (holdFired) {   // finger long-press armed: lift for the page menu
+        p.setPen(QPen(QColor(0x1565c0), 3));
+        p.setBrush(Qt::NoBrush);
+        p.drawEllipse(holdAt, 24, 24);
+    }
     if (plusOn) {   // fixed screen size
-        p.resetTransform();
         QPointF c = plusAt * scale + offset;
         p.setPen(QPen(QColor(0x1565c0), 2));
         p.setBrush(Qt::white);
@@ -213,6 +248,7 @@ QRectF Canvas::selBounds() const {
 void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     active = tl;
     plusOn = false;
+    setFocus();   // Ctrl+Z now undoes ink, not a deletion in the notebook tree
     before = sheet.strokes;
     changed = false;
     QPointF w = toWorld(s);
@@ -261,7 +297,7 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
 void Canvas::end() {
     if (active == Pen || (active == Line && cur.pts[0].pos() != cur.pts[1].pos())) {
         sheet.strokes.append(cur);
-        sheet.pages |= inkCells(sheet, cur, true);   // writing near a page bottom adds the page below
+        if (autoPages) sheet.pages |= inkCells(sheet, cur, true);   // writing near a page bottom adds the page below
         if (active == Line) paintIntoCache(cur, 0);
         changed = true;
     } else if (active == Lasso || active == Rect) {
@@ -281,6 +317,17 @@ void Canvas::end() {
     active = None;
     update();
     if (changed) pushUndo(before);
+}
+
+void Canvas::cancel() {
+    if (active == None) return;
+    sheet.strokes = before;   // drops the live stroke, restores erased strokes and moved selections
+    active = None;
+    moving = false;
+    dragBy = {};
+    lasso.clear();
+    cacheDirty = true;
+    update();
 }
 
 void Canvas::pushUndo(const QList<Stroke> &prev) {
@@ -388,6 +435,7 @@ static bool fromTouch(const QMouseEvent *e) {
 void Canvas::mousePressEvent(QMouseEvent *e) {
     if (fromTouch(e)) return;
     lastMouse = e->position();
+    if (e->button() == Qt::RightButton && active == None) pageMenu(e->position());
     if (e->button() == Qt::LeftButton && active == None && !pressPlus(e->position())) begin(e->position(), 1, e->timestamp(), tool);
 }
 
@@ -408,9 +456,21 @@ void Canvas::mouseReleaseEvent(QMouseEvent *e) {
 
 void Canvas::tabletEvent(QTabletEvent *e) {
     lastPenMs = QDateTime::currentMSecsSinceEpoch();
+    // Right-click button: one menu per hold, like the notebook tree; it cancels a stroke in progress.
+    // Held-button events stay ours, else Qt turns them into mouse events that close the menu again.
+    if (e->buttons() & menuButtons) {
+        if (!menuHeld && (e->type() == QEvent::TabletPress || active != None)) {
+            menuHeld = true;
+            cancel();
+            pageMenu(e->position());
+        }
+        return e->accept();   // hovering with the button held opens nothing; touching down then does
+    }
+    menuHeld = false;
+    if (QApplication::activePopupWidget()) return e->ignore();   // a menu is open: Qt turns the pen into a mouse click on it
     e->accept();   // accepting stops synthesized mouse events
     float pr = qBound(0.f, float((e->pressure() - pressLow) / (pressHigh - pressLow)), 1.f);
-    if (e->type() == QEvent::TabletPress && active == None && !(e->buttons() & menuButtons) && !pressPlus(e->position())) {
+    if (e->type() == QEvent::TabletPress && active == None && !pressPlus(e->position())) {
         bool eraser = e->pointerType() == QPointingDevice::PointerType::Eraser || (e->buttons() & eraserButtons);
         begin(e->position(), pr, e->timestamp(), eraser ? Eraser : tool);
     } else if (e->type() == QEvent::TabletMove && active == None && !e->buttons()) {
@@ -449,12 +509,36 @@ bool Canvas::pressPlus(QPointF s) {
     return true;
 }
 
-bool Canvas::deletePage() {
-    if (active != None || !canDeletePage(sheet, focused())) return false;
-    sheet.pages.remove(focused());
+bool Canvas::deletePage(QPoint c) {
+    if (active != None || !canDeletePage(sheet, c)) return false;
+    sheet.pages.remove(c);
     modified();
     update();
     return true;
+}
+
+void Canvas::clearPage(QPoint c) {
+    if (active != None) return;
+    QList<Stroke> prev = sheet.strokes;
+    // ponytail: removes whole strokes, also their parts on other pages; split strokes at the page edge if that bites
+    if (!sheet.strokes.removeIf([&](const Stroke &s) { return inkCells(sheet, s).contains(c); })) return;
+    sel.clear();
+    cacheDirty = true;
+    pushUndo(prev);
+    update();
+}
+
+void Canvas::pageMenu(QPointF s) {
+    QPoint c = sheet.cellAt(toWorld(s));
+    if (menuOpen || (sinceMenu.isValid() && sinceMenu.elapsed() < 500) || !sheet.pages.contains(c)) return;
+    menuOpen = true;
+    plusOn = false;
+    QMenu m;
+    m.addAction("Clear page", [&] { clearPage(c); })->setEnabled(sheet.exportQueue.contains(c));   // queue = pages with ink
+    m.addAction("Delete page", [&] { deletePage(c); })->setEnabled(canDeletePage(sheet, c));
+    m.exec(mapToGlobal(s.toPoint()));
+    menuOpen = false;
+    sinceMenu.start();
 }
 
 bool Canvas::setPageSize(QSizeF mm) {

@@ -15,6 +15,7 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QTabletEvent>
+#include <QTemporaryDir>
 #include <QVBoxLayout>
 #include <functional>
 #include <QDir>
@@ -22,6 +23,7 @@
 #include <QElapsedTimer>
 #include <QMainWindow>
 #include <QMenu>
+#include <QPainter>
 #include <QMessageBox>
 #include <QSlider>
 #include <QStandardItemModel>
@@ -51,6 +53,7 @@ static QStandardItem *makeItem(const QString &path) {
 static void fill(QStandardItem *folder, const QString &dir) {
     QDir d(dir);
     QStringList names = d.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name) + d.entryList({"*" + kExt}, QDir::Files, QDir::Name);
+    names.removeIf([](const QString &n) { return n.startsWith('.'); });   // session trash
     QStringList order;
     QFile f(dir + "/order.txt");
     if (f.open(QIODevice::ReadOnly | QIODevice::Text)) order = QString::fromUtf8(f.readAll()).split('\n', Qt::SkipEmptyParts);
@@ -255,32 +258,89 @@ static void pageSetup(QWidget *parent, Canvas *canvas) {
     if (dlg.exec() == QDialog::Accepted) canvas->setPageSize({wd->value(), ht->value()});
 }
 
-// Export queue = pages with ink, in the order they got it; dragging here reorders it (saved with the sheet).
+// Every page as a thumbnail: tap toggles it, drag reorders, the number is its place in the PDF.
+// Pages with ink start on, in export-queue order; the new order of those is saved with the sheet.
 static void exportDialog(QWidget *parent, Canvas *canvas) {
-    if (canvas->sheet.exportQueue.isEmpty())
-        return (void)QMessageBox::information(parent, "Techy-Draw", "No page has ink yet.");
+    const Sheet &s = canvas->sheet;
+    QList<QPoint> pages = s.exportQueue, rest = s.pages.values();
+    std::sort(rest.begin(), rest.end(), [](QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); });
+    for (QPoint c : rest)
+        if (!pages.contains(c)) pages << c;
+    enum { CellRole = Qt::UserRole, OnRole, ThumbRole, DimRole };
     QDialog dlg(parent);
     dlg.setWindowTitle("Export PDF");
+    dlg.resize(900, 650);
     auto list = new QListWidget;
+    list->setViewMode(QListView::IconMode);
+    list->setMovement(QListView::Static);   // reorder through drag and drop, not free placement
     list->setDragDropMode(QAbstractItemView::InternalMove);
-    for (QPoint c : canvas->sheet.exportQueue)
-        (new QListWidgetItem(QString("Page %1,%2").arg(c.x()).arg(c.y()), list))->setData(Qt::UserRole, c);
+    list->setDefaultDropAction(Qt::MoveAction);
+    list->setResizeMode(QListView::Adjust);
+    list->setSpacing(10);
+    QFont big = list->font();   // the export number under each page
+    big.setPointSize(14);
+    big.setBold(true);
+    list->setFont(big);
+    const double k = 220 / s.page.height();   // thumbnail px per mm
+    list->setIconSize((s.page * k).toSize());
+    for (QPoint c : pages) {
+        QPixmap px((s.page * k).toSize());
+        px.fill(Qt::white);
+        QPainter p(&px);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.scale(k, k);
+        drawPage(p, s, c);
+        p.resetTransform();
+        p.setPen(QColor(0x80, 0x80, 0x80));
+        p.drawRect(px.rect().adjusted(0, 0, -1, -1));   // frame: white page on a white list
+        p.end();
+        QPixmap dim = px;
+        QPainter(&dim).fillRect(dim.rect(), QColor(90, 90, 90, 170));
+        auto it = new QListWidgetItem(list);
+        it->setData(CellRole, c);
+        it->setData(OnRole, s.exportQueue.contains(c));
+        it->setData(ThumbRole, px);
+        it->setData(DimRole, dim);
+        it->setToolTip(QString("Page %1,%2 (column, row)").arg(c.x()).arg(c.y()));
+    }
+    auto renumber = [&] {
+        int n = 0;
+        for (int i = 0; i < list->count(); ++i) {
+            QListWidgetItem *it = list->item(i);
+            bool on = it->data(OnRole).toBool();
+            it->setText(on ? QString::number(++n) : "skip");
+            it->setIcon(it->data(on ? ThumbRole : DimRole).value<QPixmap>());
+        }
+    };
+    renumber();
+    QObject::connect(list, &QListWidget::itemClicked, [&](QListWidgetItem *it) {
+        it->setData(OnRole, !it->data(OnRole).toBool());
+        renumber();
+    });
+    auto later = [&] { QTimer::singleShot(0, &dlg, renumber); };   // after the drop has finished
+    QObject::connect(list->model(), &QAbstractItemModel::rowsMoved, &dlg, later);
+    QObject::connect(list->model(), &QAbstractItemModel::rowsInserted, &dlg, later);
     auto box = new QDialogButtonBox(QDialogButtonBox::Cancel);
     box->addButton("Export...", QDialogButtonBox::AcceptRole);
     QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     QObject::connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     auto lay = new QVBoxLayout(&dlg);
-    lay->addWidget(new QLabel("Pages with ink (column, row). Drag to change the order."));
+    lay->addWidget(new QLabel("Tap a page to include or skip it, drag to change the order."));
     lay->addWidget(list);
     lay->addWidget(box);
     if (dlg.exec() != QDialog::Accepted) return;
-    QList<QPoint> q;
-    for (int i = 0; i < list->count(); ++i) q << list->item(i)->data(Qt::UserRole).toPoint();
-    canvas->setExportQueue(q);
+    QList<QPoint> chosen, queue;
+    for (int i = 0; i < list->count(); ++i) {
+        QPoint c = list->item(i)->data(CellRole).toPoint();
+        if (list->item(i)->data(OnRole).toBool()) chosen << c;
+        if (s.exportQueue.contains(c)) queue << c;
+    }
+    canvas->setExportQueue(queue);
+    if (chosen.isEmpty()) return (void)QMessageBox::information(parent, "Techy-Draw", "No page chosen.");
     QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     QString file = QFileDialog::getSaveFileName(parent, "Export PDF", docs + "/" + QFileInfo(canvas->path).completeBaseName() + ".pdf",
                                                 "PDF (*.pdf)");
-    if (!file.isEmpty() && !exportPdf(canvas->sheet, file)) QMessageBox::warning(parent, "Techy-Draw", "Could not write " + file);
+    if (!file.isEmpty() && !exportPdf(s, chosen, file)) QMessageBox::warning(parent, "Techy-Draw", "Could not write " + file);
 }
 
 int main(int argc, char **argv) {
@@ -301,11 +361,19 @@ int main(int argc, char **argv) {
     auto sheetMenu = w.menuBar()->addMenu("Sheet");
     sheetMenu->addAction("Export PDF...", [&] { exportDialog(&w, canvas); })->setShortcut(Qt::CTRL | Qt::Key_E);
     sheetMenu->addAction("Page setup...", [&] { pageSetup(&w, canvas); });
-    sheetMenu->addAction("Delete page at screen centre", [&] {
-        if (!canvas->deletePage())
-            QMessageBox::information(&w, "Techy-Draw", "Only an empty page can be deleted, not the last one, and not one that holds other pages together.");
+    auto settings = w.menuBar()->addMenu("Settings");
+    settings->addAction("Calibrate pen...", [&] { calibratePen(&w, canvas); });
+    canvas->autoPages = st.value("pages/auto", true).toBool();
+    auto autoPages = settings->addAction("Create pages automatically", [&](bool on) {
+        canvas->autoPages = on;
+        QSettings().setValue("pages/auto", on);
+        canvas->update();   // ghost page
     });
-    w.menuBar()->addMenu("Settings")->addAction("Calibrate pen...", [&] { calibratePen(&w, canvas); });
+    autoPages->setCheckable(true);
+    autoPages->setChecked(canvas->autoPages);
+    autoPages->setToolTip("Ink outside the pages, near a page bottom or on the ghost page creates pages. Off: only \"+\" adds pages.");
+    // Ctrl+Z restores the last notebook-tree deletion while the tree has focus (drawing takes the focus away)
+    std::function<bool()> undoDelete = [] { return false; };
 
     auto tb = w.addToolBar("Tools");
     tb->setMovable(false);
@@ -355,7 +423,7 @@ int main(int argc, char **argv) {
     tb->addWidget(size);
 
     tb->addSeparator();
-    tb->addAction("Undo", [=] { canvas->undo(); })->setShortcut(QKeySequence::Undo);
+    tb->addAction("Undo", [&] { if (!undoDelete()) canvas->undo(); })->setShortcut(QKeySequence::Undo);
     tb->addAction("Redo", [=] { canvas->redo(); })->setShortcut(QKeySequence::Redo);
     tb->addSeparator();
     tb->addAction("Cut", [=] { canvas->copySelection(); canvas->deleteSelection(); })->setShortcut(QKeySequence::Cut);
@@ -389,14 +457,44 @@ int main(int argc, char **argv) {
     // Renames and drag moves change the model; mirror them on disk once the change is complete.
     auto sync = new QTimer(&w);
     sync->setSingleShot(true);
+    auto rebuild = [&] {
+        model->clear();
+        fill(root, rootDir);
+        view->expandAll();
+    };
     QObject::connect(sync, &QTimer::timeout, [&] {
         canvas->save();
         if (syncFolder(root, rootDir, canvas)) return;
         warn("Name already taken or not allowed.");
-        model->clear();
-        fill(root, rootDir);
-        view->expandAll();
+        rebuild();
     });
+
+    // Deleting moves the file/folder into a session trash inside the notebook root (same drive: a plain rename);
+    // Ctrl+Z moves it back. The trash is emptied when the app closes.
+    // ponytail: after a crash the trash stays as a hidden ".trash-*" folder in the root; clean it up at startup if they pile up
+    QTemporaryDir trash(rootDir + "/.trash-XXXXXX");
+    QList<std::pair<QString, QString>> deleted;   // (in trash, original path)
+    auto remove = [&](QStandardItem *it) {
+        QString from = it->data(PathRole).toString(), to = trash.filePath(QString::number(deleted.size()));
+        auto holdsOpen = [&] { return canvas->path == from || canvas->path.startsWith(from + "/"); };
+        if (holdsOpen()) canvas->open({});   // saves, then closes the sheet (unless saving failed)
+        if (holdsOpen() || !trash.isValid() || !QDir().rename(from, to))
+            return warn("Could not delete " + from);
+        deleted.append({to, from});
+        view->setFocus();   // Ctrl+Z restores it, even when the menu came from the pen
+        (it->parent() ? it->parent() : root)->removeRow(it->row());   // rowsRemoved -> order.txt
+    };
+    undoDelete = [&] {
+        if (!view->hasFocus() || deleted.isEmpty()) return false;
+        auto [at, to] = deleted.last();
+        if (QFileInfo::exists(to) || !QDir().rename(at, to)) {
+            warn("Could not restore " + to);
+            return true;
+        }
+        deleted.removeLast();
+        rebuild();
+        return true;
+    };
     QObject::connect(model, &QStandardItemModel::itemChanged, sync, qOverload<>(&QTimer::start));
     QObject::connect(model, &QAbstractItemModel::rowsRemoved, sync, qOverload<>(&QTimer::start));
 
@@ -427,6 +525,12 @@ int main(int argc, char **argv) {
         m.addAction("New sheet", [&] { add(folder, true); });
         m.addAction(folder == root ? "New notebook" : "New chapter", [&] { add(folder, false); });
         if (it) m.addAction("Rename", [&] { view->edit(it->index()); });
+        if (it) m.addAction("Delete", [&] { remove(it); });
+        if (!deleted.isEmpty())
+            m.addAction("Undo delete of \"" + QFileInfo(deleted.last().second).completeBaseName() + "\" (Ctrl+Z)", [&] {
+                view->setFocus();
+                undoDelete();
+            });
         m.exec(view->viewport()->mapToGlobal(pos));
     });
 

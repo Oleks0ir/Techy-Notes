@@ -89,20 +89,30 @@ int main() {
     g.pages = {{0, 0}};
     assert(!canDeletePage(g, {0, 0}));
 
-    // PDF: one page per queue entry, page size from the sheet (landscape kept)
+    // auto page creation off: ink outside pages makes no page and is not queued
+    g = Sheet{};
+    g.strokes << line(10, 10, 20, 10) << line(250, 10, 260, 10);
+    refresh(g, false);
+    assert(g.pages == QSet<QPoint>({{0, 0}}) && g.exportQueue == QList<QPoint>({{0, 0}}));
+
+    // PDF: one page per chosen page (empty ones too), page size from the sheet (landscape kept)
     g = Sheet{};
     g.page = {297, 210};
     g.strokes << line(10, 10, 600, 10) << line(10, 300, 20, 300);   // crosses three pages; one on row 1
     refresh(g);
     assert(g.exportQueue.size() == 4);
-    QString pdfPath = tmp.filePath("a.pdf");
-    assert(exportPdf(g, pdfPath));
-    QFile pf(pdfPath);
-    assert(pf.open(QIODevice::ReadOnly));
-    QByteArray pdf = pf.readAll();
+    auto pdfOf = [&](const QList<QPoint> &pages) {
+        QString path = tmp.filePath("a.pdf");
+        assert(exportPdf(g, pages, path));
+        QFile pf(path);
+        assert(pf.open(QIODevice::ReadOnly));
+        return pf.readAll();
+    };
+    QByteArray pdf = pdfOf(g.exportQueue);
     assert(pdf.startsWith("%PDF") && pdf.contains("/Count 4"));
     assert(pdf.contains("/MediaBox [0 0 842") && !pdf.contains("/MediaBox [0 0 595"));   // 297 x 210 mm in points
-    assert(!exportPdf(Sheet{}, tmp.filePath("b.pdf")));                                    // nothing to export
+    assert(pdfOf({{1, 0}, {7, 7}}).contains("/Count 2"));                                 // subset + a blank page
+    assert(!exportPdf(g, {}, tmp.filePath("b.pdf")));                                      // nothing to export
 
     std::puts("selftest ok");
 }

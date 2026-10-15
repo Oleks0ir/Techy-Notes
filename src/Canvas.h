@@ -1,5 +1,6 @@
 #pragma once
 #include "Sheet.h"
+#include <QElapsedTimer>
 #include <QPixmap>
 #include <QTimer>
 #include <QWidget>
@@ -28,7 +29,9 @@ public:
     void paste();
     bool open(const QString &file);   // saves the current sheet first; false: kept current sheet or load failed
     void save();                 // writes pending changes now (autosave does it 1 s after the last change)
-    bool deletePage();           // the focused page (under the screen centre); false: not empty, last one, or would split
+    bool autoPages = true;       // Settings: ink creates pages (outside pages, page below, ghost page)
+    bool deletePage(QPoint c);   // false: not empty, last one, or would split the layout
+    void clearPage(QPoint c);    // removes the strokes touching page c (undoable)
     bool setPageSize(QSizeF mm); // false once the sheet has ink
     void setExportQueue(const QList<QPoint> &q);
 
@@ -47,10 +50,12 @@ private:
     void begin(QPointF screen, float pressure, qint64 t, Tool t0);
     void move(QPointF screen, float pressure, qint64 t);
     void end();
+    void cancel();               // drops the gesture in progress without an undo step
     void erase(QPointF world);
     void pushUndo(const QList<Stroke> &prev);
     void modified();             // after any sheet edit: pages/queue follow the ink, autosave
     void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
+    void pageMenu(QPointF screen);   // right-click on a page: clear / delete
     bool pressPlus(QPointF screen);
     QPoint focused() const { return sheet.cellAt(toWorld(rect().center())); }
     void select(const QSet<int> &s);
@@ -85,6 +90,12 @@ private:
     bool plusOn = false;       // "+" shown at plusAt (world mm, edge midpoint); adds plusCell
     QPoint plusCell;
     QPointF plusAt;
+    bool menuOpen = false;     // one page menu at a time, none within 500 ms after the last (pens repeat presses)
+    QElapsedTimer sinceMenu;
+    QTimer hold;               // finger long-press -> page menu
+    QPointF holdAt;
+    bool holdFired = false;    // held long enough: the lift opens the menu
+    bool menuHeld = false;     // pen right-click button still held since its menu opened
     QTimer autosave;
     bool dirty = false;        // changes not yet on disk
     QTimer settle;             // running while a pan/zoom gesture is in progress
