@@ -1,5 +1,10 @@
 #include "Canvas.h"
 #include <QActionGroup>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QFileDialog>
+#include <QFormLayout>
+#include <QListWidget>
 #include <QApplication>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -205,6 +210,79 @@ static void calibratePen(QWidget *parent, Canvas *canvas) {
     st.setValue("pen/high", firm);
 }
 
+static void pageSetup(QWidget *parent, Canvas *canvas) {
+    if (!canvas->sheet.strokes.isEmpty())
+        return (void)QMessageBox::information(parent, "Techy-Draw", "The page size can only change while the sheet is empty.");
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Page setup");
+    const char *names[] = {"A4", "A5", "Letter", "Custom"};
+    const QSizeF sizes[] = {{210, 297}, {148, 210}, {215.9, 279.4}};
+    QSizeF cur = canvas->sheet.page;
+    auto preset = new QComboBox;
+    for (const char *n : names) preset->addItem(n);
+    preset->setCurrentIndex(3);
+    for (int i = 0; i < 3; ++i)
+        if (sizes[i] == cur || sizes[i].transposed() == cur) preset->setCurrentIndex(i);
+    auto landscape = new QCheckBox("Landscape");
+    landscape->setChecked(cur.width() > cur.height());
+    QDoubleSpinBox *wd = new QDoubleSpinBox, *ht = new QDoubleSpinBox;
+    for (auto [sb, v] : {std::pair(wd, cur.width()), std::pair(ht, cur.height())}) {
+        sb->setRange(50, 2000);
+        sb->setDecimals(1);
+        sb->setSuffix(" mm");
+        sb->setValue(v);
+    }
+    QObject::connect(preset, &QComboBox::currentIndexChanged, [&](int i) {
+        if (i == 3) return;
+        QSizeF s = landscape->isChecked() ? sizes[i].transposed() : sizes[i];
+        wd->setValue(s.width());
+        ht->setValue(s.height());
+    });
+    QObject::connect(landscape, &QCheckBox::toggled, [&] {
+        double w = wd->value();
+        wd->setValue(ht->value());
+        ht->setValue(w);
+    });
+    auto box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto form = new QFormLayout(&dlg);
+    form->addRow("Size", preset);
+    form->addRow("", landscape);
+    form->addRow("Width", wd);
+    form->addRow("Height", ht);
+    form->addRow(box);
+    if (dlg.exec() == QDialog::Accepted) canvas->setPageSize({wd->value(), ht->value()});
+}
+
+// Export queue = pages with ink, in the order they got it; dragging here reorders it (saved with the sheet).
+static void exportDialog(QWidget *parent, Canvas *canvas) {
+    if (canvas->sheet.exportQueue.isEmpty())
+        return (void)QMessageBox::information(parent, "Techy-Draw", "No page has ink yet.");
+    QDialog dlg(parent);
+    dlg.setWindowTitle("Export PDF");
+    auto list = new QListWidget;
+    list->setDragDropMode(QAbstractItemView::InternalMove);
+    for (QPoint c : canvas->sheet.exportQueue)
+        (new QListWidgetItem(QString("Page %1,%2").arg(c.x()).arg(c.y()), list))->setData(Qt::UserRole, c);
+    auto box = new QDialogButtonBox(QDialogButtonBox::Cancel);
+    box->addButton("Export...", QDialogButtonBox::AcceptRole);
+    QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto lay = new QVBoxLayout(&dlg);
+    lay->addWidget(new QLabel("Pages with ink (column, row). Drag to change the order."));
+    lay->addWidget(list);
+    lay->addWidget(box);
+    if (dlg.exec() != QDialog::Accepted) return;
+    QList<QPoint> q;
+    for (int i = 0; i < list->count(); ++i) q << list->item(i)->data(Qt::UserRole).toPoint();
+    canvas->setExportQueue(q);
+    QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    QString file = QFileDialog::getSaveFileName(parent, "Export PDF", docs + "/" + QFileInfo(canvas->path).completeBaseName() + ".pdf",
+                                                "PDF (*.pdf)");
+    if (!file.isEmpty() && !exportPdf(canvas->sheet, file)) QMessageBox::warning(parent, "Techy-Draw", "Could not write " + file);
+}
+
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Techy-Draw");
@@ -220,6 +298,13 @@ int main(int argc, char **argv) {
     canvas->menuButtons = st.value("pen/menu", canvas->menuButtons).toInt();
     canvas->pressLow = st.value("pen/low", canvas->pressLow).toFloat();
     canvas->pressHigh = st.value("pen/high", canvas->pressHigh).toFloat();
+    auto sheetMenu = w.menuBar()->addMenu("Sheet");
+    sheetMenu->addAction("Export PDF...", [&] { exportDialog(&w, canvas); })->setShortcut(Qt::CTRL | Qt::Key_E);
+    sheetMenu->addAction("Page setup...", [&] { pageSetup(&w, canvas); });
+    sheetMenu->addAction("Delete page at screen centre", [&] {
+        if (!canvas->deletePage())
+            QMessageBox::information(&w, "Techy-Draw", "Only an empty page can be deleted, not the last one, and not one that holds other pages together.");
+    });
     w.menuBar()->addMenu("Settings")->addAction("Calibrate pen...", [&] { calibratePen(&w, canvas); });
 
     auto tb = w.addToolBar("Tools");
@@ -355,6 +440,13 @@ int main(int argc, char **argv) {
     dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
     dock->setWidget(view);
     w.addDockWidget(Qt::LeftDockWidgetArea, dock);
+    tb->addSeparator();
+    auto full = tb->addAction("Full screen", [&](bool on) {
+        w.setWindowState(on ? w.windowState() | Qt::WindowFullScreen : w.windowState() & ~Qt::WindowFullScreen);
+        dock->setVisible(!on);
+    });
+    full->setCheckable(true);
+    full->setShortcut(Qt::Key_F11);
 
     w.resize(1280, 800);
     w.show();

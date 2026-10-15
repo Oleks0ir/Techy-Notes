@@ -13,7 +13,8 @@ static const QColor kBackground(0x5a, 0x5a, 0x5a);
 
 Canvas::Canvas(QWidget *parent) : QWidget(parent) {
     setAttribute(Qt::WA_AcceptTouchEvents);
-    setTabletTracking(true);   // pen hover events: palm rejection now, "+" buttons later
+    setTabletTracking(true);   // pen hover: palm rejection, "+" buttons
+    setMouseTracking(true);    // mouse hover: "+" buttons
     settle.setSingleShot(true);
     settle.setInterval(150);   // re-render this long after the last pan/zoom step
     connect(&settle, &QTimer::timeout, this, qOverload<>(&QWidget::update));
@@ -24,6 +25,7 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
 }
 
 void Canvas::modified() {
+    refresh(sheet);
     dirty = true;
     autosave.start();
 }
@@ -64,6 +66,10 @@ void Canvas::zoomAt(QPointF a, double f) {
 }
 
 bool Canvas::event(QEvent *e) {
+    if (e->type() == QEvent::Leave && plusOn) {
+        plusOn = false;
+        update();
+    }
     if (e->type() == QEvent::TouchCancel && touchDrawing) {
         end();
         touchDrawing = false;
@@ -108,6 +114,7 @@ void Canvas::renderCache() {
     cacheScale = scale;
     cacheOffset = offset;
     cacheDirty = false;
+    cachePages = sheet.pages.size();
     QPainter p(&cache);
     p.setRenderHint(QPainter::Antialiasing);
     p.translate(offset);
@@ -141,7 +148,7 @@ void Canvas::paintIntoCache(const Stroke &s, int from) {
 
 void Canvas::paintEvent(QPaintEvent *) {
     bool moved = cacheScale != scale || cacheOffset != offset;
-    if (cacheDirty || cache.deviceIndependentSize() != QSizeF(size()) || (moved && !settle.isActive())) {
+    if (cacheDirty || cachePages != sheet.pages.size() || cache.deviceIndependentSize() != QSizeF(size()) || (moved && !settle.isActive())) {
         renderCache();
         moved = false;
     }
@@ -157,6 +164,12 @@ void Canvas::paintEvent(QPaintEvent *) {
     p.setRenderHint(QPainter::Antialiasing);
     p.translate(offset);
     p.scale(scale, scale);
+    QPoint ghost = focused() + QPoint(1, 0);   // the page right of the focused one; ink on it makes it real
+    if (sheet.pages.contains(focused()) && !sheet.pages.contains(ghost)) {
+        p.setPen(QPen(QColor(0xd0, 0xd0, 0xd0), 0, Qt::DashLine));
+        p.setBrush(QColor(255, 255, 255, 40));
+        p.drawRect(sheet.pageRect(ghost));
+    }
     if (active == Line) drawStroke(p, cur);
     if (!sel.isEmpty()) {
         p.save();
@@ -172,6 +185,15 @@ void Canvas::paintEvent(QPaintEvent *) {
         p.setBrush(Qt::NoBrush);
         if (active == Rect) p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
         else p.drawPolyline(lasso);
+    }
+    if (plusOn) {   // fixed screen size
+        p.resetTransform();
+        QPointF c = plusAt * scale + offset;
+        p.setPen(QPen(QColor(0x1565c0), 2));
+        p.setBrush(Qt::white);
+        p.drawEllipse(c, 12, 12);
+        p.drawLine(c - QPointF(6, 0), c + QPointF(6, 0));
+        p.drawLine(c - QPointF(0, 6), c + QPointF(0, 6));
     }
 }
 
@@ -190,6 +212,7 @@ QRectF Canvas::selBounds() const {
 
 void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     active = tl;
+    plusOn = false;
     before = sheet.strokes;
     changed = false;
     QPointF w = toWorld(s);
@@ -238,6 +261,7 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
 void Canvas::end() {
     if (active == Pen || (active == Line && cur.pts[0].pos() != cur.pts[1].pos())) {
         sheet.strokes.append(cur);
+        sheet.pages |= inkCells(sheet, cur, true);   // writing near a page bottom adds the page below
         if (active == Line) paintIntoCache(cur, 0);
         changed = true;
     } else if (active == Lasso || active == Rect) {
@@ -364,7 +388,7 @@ static bool fromTouch(const QMouseEvent *e) {
 void Canvas::mousePressEvent(QMouseEvent *e) {
     if (fromTouch(e)) return;
     lastMouse = e->position();
-    if (e->button() == Qt::LeftButton && active == None) begin(e->position(), 1, e->timestamp(), tool);
+    if (e->button() == Qt::LeftButton && active == None && !pressPlus(e->position())) begin(e->position(), 1, e->timestamp(), tool);
 }
 
 void Canvas::mouseMoveEvent(QMouseEvent *e) {
@@ -375,6 +399,7 @@ void Canvas::mouseMoveEvent(QMouseEvent *e) {
     }
     lastMouse = e->position();
     if (active != None) move(e->position(), 1, e->timestamp());
+    else if (!e->buttons()) hover(e->position());
 }
 
 void Canvas::mouseReleaseEvent(QMouseEvent *e) {
@@ -385,12 +410,63 @@ void Canvas::tabletEvent(QTabletEvent *e) {
     lastPenMs = QDateTime::currentMSecsSinceEpoch();
     e->accept();   // accepting stops synthesized mouse events
     float pr = qBound(0.f, float((e->pressure() - pressLow) / (pressHigh - pressLow)), 1.f);
-    if (e->type() == QEvent::TabletPress && active == None && !(e->buttons() & menuButtons)) {
+    if (e->type() == QEvent::TabletPress && active == None && !(e->buttons() & menuButtons) && !pressPlus(e->position())) {
         bool eraser = e->pointerType() == QPointingDevice::PointerType::Eraser || (e->buttons() & eraserButtons);
         begin(e->position(), pr, e->timestamp(), eraser ? Eraser : tool);
+    } else if (e->type() == QEvent::TabletMove && active == None && !e->buttons()) {
+        hover(e->position());
     } else if (e->type() == QEvent::TabletMove && active != None) {
         move(e->position(), pr, e->timestamp());
     } else if (e->type() == QEvent::TabletRelease && active != None) {
         end();
     }
+}
+
+// ponytail: "+" needs hover (pen or mouse); fingers have none, add a long-press on an edge if touch users need it
+void Canvas::hover(QPointF s) {
+    if (plusOn && QLineF(s, plusAt * scale + offset).length() <= 16) return;   // keep it while over it
+    QPointF w = toWorld(s);
+    QPoint c = sheet.cellAt(w);
+    QRectF r = sheet.pageRect(c);
+    std::pair<double, QPoint> edges[] = {{w.x() - r.left(), {-1, 0}}, {r.right() - w.x(), {1, 0}},
+                                         {w.y() - r.top(), {0, -1}}, {r.bottom() - w.y(), {0, 1}}};
+    auto e = *std::min_element(std::begin(edges), std::end(edges), [](auto &a, auto &b) { return a.first < b.first; });
+    bool on = sheet.pages.contains(c) && e.first * scale < 40 && !sheet.pages.contains(c + e.second);
+    QPointF at = r.center() + QPointF(e.second.x() * r.width(), e.second.y() * r.height()) / 2;
+    if (on == plusOn && (!on || at == plusAt)) return;
+    plusOn = on;
+    plusCell = c + e.second;
+    plusAt = at;
+    update();
+}
+
+bool Canvas::pressPlus(QPointF s) {
+    if (!plusOn || QLineF(s, plusAt * scale + offset).length() > 16) return false;
+    sheet.pages.insert(plusCell);
+    plusOn = false;
+    modified();
+    update();
+    return true;
+}
+
+bool Canvas::deletePage() {
+    if (active != None || !canDeletePage(sheet, focused())) return false;
+    sheet.pages.remove(focused());
+    modified();
+    update();
+    return true;
+}
+
+bool Canvas::setPageSize(QSizeF mm) {
+    if (!sheet.strokes.isEmpty() || active != None) return false;
+    sheet.page = mm;
+    cacheDirty = true;
+    modified();
+    update();
+    return true;
+}
+
+void Canvas::setExportQueue(const QList<QPoint> &q) {
+    sheet.exportQueue = q;
+    modified();
 }

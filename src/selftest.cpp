@@ -1,5 +1,6 @@
 #undef NDEBUG   // asserts must run in Release builds too
 #include "Sheet.h"
+#include <QFile>
 #include <QIODevice>
 #include <QLineF>
 #include <QTemporaryDir>
@@ -50,6 +51,58 @@ int main() {
     assert(ld.strokes.size() == 3 && ld.strokes[2].pts[1].x == 30 && ld.pages == sh.pages && ld.page == sh.page &&
            ld.exportQueue == sh.exportQueue);
     assert(!loadSheet(ld, tmp.filePath("missing.tsheet")) && ld.pages == sh.pages);   // failed load leaves it untouched
+
+    // activation is point-based: a diagonal line crossing (0,0) -> (1,0) -> (1,1) never touches (0,1)
+    auto line = [](double x1, double y1, double x2, double y2) { return Stroke{{{float(x1), float(y1), 1, 0}, {float(x2), float(y2), 1, 0}}, Qt::black, 1}; };
+    Sheet g;
+    assert(inkCells(g, line(205, 280, 215, 300)) == QSet<QPoint>({{0, 0}, {1, 0}, {1, 1}}));
+    assert(inkCells(g, line(10, 10, 10, 900)) == QSet<QPoint>({{0, 0}, {0, 1}, {0, 2}, {0, 3}}));   // resampled middle
+    assert(inkCells(g, line(-5, -5, -4, -4)) == QSet<QPoint>({{-1, -1}}));                          // negative cells
+    // down growth: ink in the bottom third adds the page below, ink above it does not
+    assert(inkCells(g, line(10, 150, 20, 150), true) == QSet<QPoint>({{0, 0}}));
+    assert(inkCells(g, line(10, 250, 20, 250), true) == QSet<QPoint>({{0, 0}, {0, 1}}));
+
+    // queue: inked pages appended in order, kept order on re-ink, emptied pages dropped; ink outside makes pages
+    g.strokes << line(10, 10, 20, 10);
+    refresh(g);
+    assert(g.exportQueue == QList<QPoint>({{0, 0}}));
+    g.strokes << line(220, 10, 230, 10) << line(10, -10, 20, -10);   // right of (0,0) and above it
+    refresh(g);
+    assert(g.pages == QSet<QPoint>({{0, 0}, {1, 0}, {0, -1}}));
+    assert(g.exportQueue == QList<QPoint>({{0, 0}, {0, -1}, {1, 0}}));   // new ones appended in row, column order
+    g.exportQueue = {{1, 0}, {0, -1}, {0, 0}};                           // user reorder
+    g.strokes << line(30, 30, 40, 40);
+    refresh(g);
+    assert(g.exportQueue == QList<QPoint>({{1, 0}, {0, -1}, {0, 0}}));
+    g.strokes.removeAt(1);                                               // erase the ink on (1,0)
+    refresh(g);
+    assert(g.exportQueue == QList<QPoint>({{0, -1}, {0, 0}}) && g.pages.contains(QPoint(1, 0)));   // empty page stays
+
+    // delete: only empty pages, never the last, no new island
+    assert(canDeletePage(g, {1, 0}) && !canDeletePage(g, {0, 0}) && !canDeletePage(g, {5, 5}));
+    g.strokes = {};
+    g.pages = {{0, 0}, {1, 0}, {2, 0}, {1, 1}};
+    assert(!canDeletePage(g, {1, 0}));                                   // would split (0,0) from (2,0)
+    assert(canDeletePage(g, {2, 0}) && canDeletePage(g, {1, 1}) && canDeletePage(g, {0, 0}));
+    g.pages = {{0, 0}, {3, 3}};                                          // islands from ink outside pages
+    assert(canDeletePage(g, {3, 3}));
+    g.pages = {{0, 0}};
+    assert(!canDeletePage(g, {0, 0}));
+
+    // PDF: one page per queue entry, page size from the sheet (landscape kept)
+    g = Sheet{};
+    g.page = {297, 210};
+    g.strokes << line(10, 10, 600, 10) << line(10, 300, 20, 300);   // crosses three pages; one on row 1
+    refresh(g);
+    assert(g.exportQueue.size() == 4);
+    QString pdfPath = tmp.filePath("a.pdf");
+    assert(exportPdf(g, pdfPath));
+    QFile pf(pdfPath);
+    assert(pf.open(QIODevice::ReadOnly));
+    QByteArray pdf = pf.readAll();
+    assert(pdf.startsWith("%PDF") && pdf.contains("/Count 4"));
+    assert(pdf.contains("/MediaBox [0 0 842") && !pdf.contains("/MediaBox [0 0 595"));   // 297 x 210 mm in points
+    assert(!exportPdf(Sheet{}, tmp.filePath("b.pdf")));                                    // nothing to export
 
     std::puts("selftest ok");
 }

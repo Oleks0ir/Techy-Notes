@@ -28,6 +28,9 @@ public:
     void paste();
     bool open(const QString &file);   // saves the current sheet first; false: kept current sheet or load failed
     void save();                 // writes pending changes now (autosave does it 1 s after the last change)
+    bool deletePage();           // the focused page (under the screen centre); false: not empty, last one, or would split
+    bool setPageSize(QSizeF mm); // false once the sheet has ink
+    void setExportQueue(const QList<QPoint> &q);
 
 protected:
     bool event(QEvent *e) override;
@@ -46,7 +49,10 @@ private:
     void end();
     void erase(QPointF world);
     void pushUndo(const QList<Stroke> &prev);
-    void modified();
+    void modified();             // after any sheet edit: pages/queue follow the ink, autosave
+    void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
+    bool pressPlus(QPointF screen);
+    QPoint focused() const { return sheet.cellAt(toWorld(rect().center())); }
     void select(const QSet<int> &s);
     QRectF selBounds() const;
     void renderCache();
@@ -75,6 +81,10 @@ private:
     double cacheScale = 0;
     QPointF cacheOffset;
     bool cacheDirty = true;
+    qsizetype cachePages = 0;  // page count the cache shows; re-render when pages are added or deleted
+    bool plusOn = false;       // "+" shown at plusAt (world mm, edge midpoint); adds plusCell
+    QPoint plusCell;
+    QPointF plusAt;
     QTimer autosave;
     bool dirty = false;        // changes not yet on disk
     QTimer settle;             // running while a pan/zoom gesture is in progress

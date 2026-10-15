@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QLineF>
 #include <QPainter>
+#include <QPdfWriter>
 #include <QSaveFile>
 #include <algorithm>
 
@@ -85,4 +86,80 @@ bool loadSheet(Sheet &s, const QString &path) {
     if (d.status() != QDataStream::Ok) return false;
     s = in;
     return true;
+}
+
+QSet<QPoint> inkCells(const Sheet &s, const Stroke &st, bool below) {
+    QSet<QPoint> out;
+    for (int i = 0; i < st.pts.size(); ++i) {
+        QPointF a = st.pts[qMax(i - 1, 0)].pos(), b = st.pts[i].pos();
+        int n = qCeil(QLineF(a, b).length() / 2);
+        for (int k = 0; k <= n; ++k) {
+            QPointF p = n ? a + (b - a) * k / n : b;
+            QPoint c = s.cellAt(p);
+            out.insert(c);
+            if (below && p.y() - s.pageRect(c).top() > s.page.height() * 2 / 3) out.insert(c + QPoint(0, 1));
+        }
+    }
+    return out;
+}
+
+void refresh(Sheet &s) {
+    // ponytail: rescans all ink on every edit, keep per-stroke cells when big sheets lag
+    QSet<QPoint> inked;
+    for (const Stroke &st : s.strokes) inked |= inkCells(s, st);
+    s.pages |= inked;
+    s.exportQueue.removeIf([&](QPoint c) { return !inked.contains(c); });
+    QList<QPoint> fresh;
+    for (QPoint c : inked)
+        if (!s.exportQueue.contains(c)) fresh << c;
+    std::sort(fresh.begin(), fresh.end(), [](QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); });
+    s.exportQueue += fresh;
+}
+
+static int islands(QSet<QPoint> left) {
+    int n = 0;
+    while (!left.isEmpty()) {
+        ++n;
+        QList<QPoint> todo{*left.begin()};
+        left.remove(todo[0]);
+        while (!todo.isEmpty()) {
+            QPoint c = todo.takeLast();
+            for (QPoint d : {QPoint(1, 0), QPoint(-1, 0), QPoint(0, 1), QPoint(0, -1)})
+                if (left.remove(c + d)) todo << c + d;
+        }
+    }
+    return n;
+}
+
+bool canDeletePage(const Sheet &s, QPoint c) {
+    if (!s.pages.contains(c) || s.pages.size() == 1) return false;
+    for (const Stroke &st : s.strokes)
+        if (inkCells(s, st).contains(c)) return false;
+    QSet<QPoint> rest = s.pages;
+    rest.remove(c);
+    return islands(rest) <= islands(s.pages);
+}
+
+bool exportPdf(const Sheet &s, const QString &path) {
+    if (s.exportQueue.isEmpty()) return false;
+    QPdfWriter pdf(path);
+    pdf.setCreator("Techy-Draw");
+    pdf.setPageSize(QPageSize(s.page, QPageSize::Millimeter, {}, QPageSize::ExactMatch));
+    pdf.setPageMargins({});
+    QPainter p;
+    if (!p.begin(&pdf)) return false;
+    p.setRenderHint(QPainter::Antialiasing);
+    double k = pdf.resolution() / 25.4;   // device units per mm
+    for (int i = 0; i < s.exportQueue.size(); ++i) {
+        if (i) pdf.newPage();
+        QRectF r = s.pageRect(s.exportQueue[i]);
+        p.save();
+        p.scale(k, k);
+        p.translate(-r.topLeft());
+        p.setClipRect(r);
+        for (const Stroke &st : s.strokes)
+            if (bounds(st).intersects(r)) drawStroke(p, st);
+        p.restore();
+    }
+    return p.end();
 }
