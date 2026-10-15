@@ -4,21 +4,23 @@ A fast, native pen notebook for Windows (Android/iOS later), in the spirit of On
 long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
-> Status: planning done, no app code yet.
+> Status: milestone 1 (window, toolbar, canvas pan/zoom, page lines).
 
 ## Stack
-- **C++20 + Qt 6 Widgets + CMake** (MSVC on Windows).
+- **C++20 + Qt 6 Widgets + CMake** (MinGW via MSYS2 or MSVC on Windows).
 - No web technologies. Native rendering via `QPainter`, pen input via Windows Ink (`QTabletEvent`).
 
 ## Build
+Toolchain: MSYS2 MinGW64 (`pacman -S mingw-w64-x86_64-{qt6-base,cmake,ninja,gcc}`).
 ```powershell
-# Path to the Qt 6 MSVC kit (also noted in your local .env)
-$env:QT_DIR = "C:/Qt/6.8.3/msvc2022_64"
-cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"
-cmake --build build --config Release
-./build/Release/selftest.exe     # model self-check (asserts)
-./build/Release/techy-draw.exe
+$env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # compiler, CMake, Qt DLLs
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/selftest.exe     # model self-check (asserts)
+./build/techy-draw.exe
 ```
+MSVC + official Qt kit also works: `cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"` (`QT_DIR` noted in `.env`),
+`cmake --build build --config Release`, binaries in `build/Release/`.
 
 ## Concepts
 | Term | Meaning |

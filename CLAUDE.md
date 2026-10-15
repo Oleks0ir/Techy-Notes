@@ -3,12 +3,13 @@
 Native pen notebook. Product spec and architecture: README.md. Original idea: VISION.md.
 
 ## Stack
-C++20, Qt 6 Widgets, CMake, MSVC. No web tech, no new dependencies without asking.
+C++20, Qt 6 Widgets, CMake. Toolchain on this machine: MSYS2 MinGW64 (Qt from pacman); keep code MSVC-compatible.
+No web tech, no new dependencies without asking.
 
-## Build & check
-- `cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"` (QT_DIR from `.env`)
-- `cmake --build build --config Release`
-- `./build/Release/selftest.exe` — must pass after model changes.
+## Build & check (PATH must include `C:\msys64\mingw64\bin`)
+- `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release`
+- `cmake --build build`
+- `./build/selftest.exe` — must pass after model changes.
 
 ## Conventions
 - Minimal code: prefer Qt built-ins over custom code; keep the small file layout from README.md.

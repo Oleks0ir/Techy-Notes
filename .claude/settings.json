@@ -102,8 +102,8 @@
     "allow": [
       "Bash(cmake:*)",
       "PowerShell(cmake:*)",
-      "Bash(./build/Release/selftest.exe)",
-      "PowerShell(./build/Release/selftest.exe)",
+      "Bash(./build/selftest.exe)",
+      "PowerShell(./build/selftest.exe)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)"
