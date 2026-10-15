@@ -5,7 +5,12 @@
 #include <QRectF>
 #include <QSet>
 
-struct Pt { float x, y, p; qint64 t; };                       // mm, pressure 0..1, ms timestamp
+class QPainter;
+
+struct Pt {                                                    // mm, pressure 0..1, ms timestamp
+    float x, y, p; qint64 t;
+    QPointF pos() const { return {x, y}; }
+};
 struct Stroke { QList<Pt> pts; QColor color; float width; };   // a line is a 2-point stroke
 
 struct Sheet {
@@ -18,3 +23,8 @@ struct Sheet {
         return {c.x() * page.width(), c.y() * page.height(), page.width(), page.height()};
     }
 };
+
+bool hits(const Stroke &s, QPointF p, float radius);   // p within radius (mm) of the stroke's ink
+QPointF snap15(QPointF a, QPointF b);                  // b rotated around a to the nearest 15° step
+void drawSegment(QPainter &p, const Stroke &s, int i); // segment ending at point i (a dot for i == 0)
+void drawStroke(QPainter &p, const Stroke &s);         // painter in mm coordinates

@@ -7,8 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 qt_standard_project_setup()
 
-qt_add_executable(techy-draw WIN32 src/main.cpp src/Canvas.cpp)
+qt_add_executable(techy-draw WIN32 src/main.cpp src/Canvas.cpp src/Sheet.cpp)
 target_link_libraries(techy-draw PRIVATE Qt6::Widgets)
 
-qt_add_executable(selftest src/selftest.cpp)
+qt_add_executable(selftest src/selftest.cpp src/Sheet.cpp)
 target_link_libraries(selftest PRIVATE Qt6::Gui)
