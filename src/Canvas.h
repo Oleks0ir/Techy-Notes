@@ -60,6 +60,7 @@ private:
     QSet<int> sel;             // selected stroke indices; drawn on top, not in the cache
     QPolygonF lasso;           // select gesture outline (Rect: first + last point), world mm
     bool moving = false;       // select gesture drags the selection
+    bool adding = false;       // select gesture adds to the selection (Shift/Ctrl held)
     QPointF dragFrom, dragBy;  // world mm
 
     QPixmap cache;             // pages + committed ink, rendered at cacheScale/cacheOffset

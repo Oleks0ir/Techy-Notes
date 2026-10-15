@@ -162,11 +162,12 @@ void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     QPointF w = toWorld(s);
     Pt pt{float(w.x()), float(w.y()), pr, t};
     if (tl == Lasso || tl == Rect) {
-        moving = !sel.isEmpty() && selBounds().contains(w);
+        adding = QGuiApplication::keyboardModifiers() & (Qt::ShiftModifier | Qt::ControlModifier);
+        moving = !adding && !sel.isEmpty() && selBounds().contains(w);
         dragFrom = w;
         dragBy = {};
         if (!moving) {
-            select({});
+            if (!adding) select({});
             lasso = {w};
         }
         return;
@@ -212,8 +213,9 @@ void Canvas::end() {
                 for (Pt &p : sheet.strokes[i].pts) { p.x += dragBy.x(); p.y += dragBy.y(); }
             changed = true;
         } else if (!moving) {
-            select(strokesInside(sheet.strokes, active == Rect ? QPolygonF(QRectF(lasso.first(), lasso.last()).normalized())
-                                                                 : lasso));
+            QSet<int> in = strokesInside(sheet.strokes, active == Rect ? QPolygonF(QRectF(lasso.first(), lasso.last()).normalized())
+                                                                         : lasso);
+            select(adding ? in | sel : in);
         }
         moving = false;
         dragBy = {};
