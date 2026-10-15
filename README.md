@@ -1,0 +1,108 @@
+# Techy-Draw
+
+A fast, native pen notebook for Windows (Android/iOS later), in the spirit of OneNote — with a
+long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
+Derive inspired). See [VISION.md](VISION.md) for the original idea.
+
+> Status: planning done, no app code yet.
+
+## Stack
+- **C++20 + Qt 6 Widgets + CMake** (MSVC on Windows).
+- No web technologies. Native rendering via `QPainter`, pen input via Windows Ink (`QTabletEvent`).
+
+## Build
+```powershell
+# Path to the Qt 6 MSVC kit (also noted in your local .env)
+$env:QT_DIR = "C:/Qt/6.8.3/msvc2022_64"
+cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"
+cmake --build build --config Release
+./build/Release/selftest.exe     # model self-check (asserts)
+./build/Release/techy-draw.exe
+```
+
+## Concepts
+| Term | Meaning |
+|---|---|
+| **Notebook** | A folder. |
+| **Chapter** | A subfolder of a notebook. Custom order stored in `order.txt` per folder. |
+| **Sheet** | One `.tsheet` file = one seamless canvas. |
+| **Page** | A cell (col,row) of the sheet's page grid, A4 portrait by default. Page lines are visual guides only — you can write across them. |
+| **Active page** | A page that currently contains ink. Only active pages are exported. |
+| **Focused page** | The page under the center of the screen. |
+| **Ghost page** | A dashed page shown right of the focused page; becomes real when written on. |
+
+## V1 features
+
+### Tools (top toolbar, always visible)
+- **Freehand** — width follows pen pressure; color and width presets.
+- **Straight line** — Shift (or toolbar toggle on touch) snaps to 15°.
+- **Select** — lasso and rectangle; move, delete, copy/paste (also across sheets), recolor
+  (click a color preset while a selection exists).
+- **Eraser** — removes whole strokes. The pen's eraser end / barrel button switches to it
+  temporarily (button mapping is a setting).
+- **Undo/redo** — up to 100 steps.
+
+### Input
+- Pen draws, finger pans and pinch-zooms, touch is ignored while the pen is near the screen (palm rejection).
+- Mouse: draws; wheel scrolls, Shift+wheel scrolls horizontally, Ctrl+wheel zooms, middle-drag pans.
+
+### Pages
+- Pages form a free layout (L-shapes and separate islands allowed; coordinates may be negative).
+- **Down:** ink in the bottom third of a page creates an empty page below it.
+- **Right:** a ghost page always sits right of the focused page.
+- **Anywhere:** ink outside any page creates the pages it touches.
+- **"+" buttons** on free page edges appear when the pen/mouse hovers near them (to add empty space ahead of time).
+- **Delete:** only empty pages, and only if the layout stays connected.
+- **Page setup** (A4 / A5 / Letter / custom, orientation) — only while the sheet is empty.
+
+### Export
+- A page that gets ink is appended to the end of the export queue; a page that becomes empty leaves it.
+- At export the user reorders the queue (drag-and-drop); the order is saved in the sheet.
+- Output: vector PDF, one page per queued page; strokes crossing page lines are clipped per page.
+
+### Notebook UI
+- Side panel tree (notebooks → chapters → sheets) with drag reorder, inline rename,
+  new sheet / new chapter via context menu.
+- Full-screen mode hides the side panel; the toolbar stays.
+- Autosave shortly after each change; atomic writes so a crash never corrupts a sheet.
+
+## Architecture
+```cpp
+struct Pt     { float x, y, p; qint64 t; };                       // mm, pressure, timestamp
+struct Stroke { QVector<Pt> pts; QColor color; float width; };    // a line is a 2-point stroke
+struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297}; QList<QPoint> exportQueue; };
+```
+- World units are millimetres. A stroke's pages = pages containing its points (lines are resampled
+  first), so diagonal strokes never activate pages they don't cross.
+- Rendering: committed ink is cached in one HiDPI-aware pixmap; the live stroke is painted straight
+  into it (low latency). During pan/zoom the cached pixmap is transformed and re-rendered when the
+  gesture ends.
+- Persistence: `QDataStream` with a format version + `QSaveFile`.
+- Undo: implicitly-shared snapshots of the stroke list.
+
+| File | Contents |
+|---|---|
+| `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs |
+| `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
+| `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
+| `src/selftest.cpp` | Assert-based checks of the model |
+
+## Milestones
+1. Window, toolbar, tree, canvas pan/zoom, page lines — tested on a real pen tablet right away.
+2. Freehand with pressure, straight line, eraser, undo.
+3. Select (lasso/rect, move, delete, copy/paste, recolor).
+4. Save/load/autosave, notebook tree, new sheet/chapter.
+5. Page growth, activation, export queue, PDF, page setup, page delete, full screen.
+
+## Deliberately postponed
+- Tile cache / GPU rendering — when a 10k-stroke sheet stutters.
+- Spatial index — when hit-testing shows up in a profile.
+- Stroke smoothing — if pen input looks jaggy.
+- Highlighter/opacity, export thumbnails, image paste, rotate/resize of selections.
+
+## Future: math (after V1)
+Ink-first: lasso-select a handwritten equation → a **Math side panel** shows the recognized
+equation, lets you format it nicely and plot it → paste the plot onto the canvas as a crisp vector
+snapshot. Input is math notation only (Desmos-style), with room for a richer language later.
+The recognition engine is still to be chosen. V1 already stores pressure and timestamps per point
+so recognition can use them.

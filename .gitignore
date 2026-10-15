@@ -1,0 +1,7 @@
+build/
+out/
+.vs/
+*.user
+CMakeUserPresets.json
+.env
+.claude/settings.local.json
