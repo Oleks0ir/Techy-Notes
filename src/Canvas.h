@@ -6,7 +6,7 @@
 
 class Canvas : public QWidget {
 public:
-    enum Tool { Pen, Line, Select, Eraser, None } tool = Pen;
+    enum Tool { Pen, Line, Lasso, Rect, Eraser, None } tool = Pen;
     Sheet sheet;
     QColor color = Qt::black;
     float width = 0.5;           // mm
@@ -17,6 +17,10 @@ public:
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
     void redo();
+    void setColor(QColor c);     // also recolors the selection
+    void copySelection();
+    void deleteSelection();
+    void paste();
 
 protected:
     bool event(QEvent *e) override;
@@ -34,6 +38,9 @@ private:
     void move(QPointF screen, float pressure, qint64 t);
     void end();
     void erase(QPointF world);
+    void pushUndo(const QList<Stroke> &prev);
+    void select(const QSet<int> &s);
+    QRectF selBounds() const;
     void renderCache();
     void paintIntoCache(const Stroke &s, int fromPt);
     QPointF toWorld(QPointF s) const { return (s - offset) / scale; }
@@ -49,6 +56,11 @@ private:
     bool changed = false;
     Stroke cur;                // live freehand stroke / line preview
     QList<QList<Stroke>> undoStack, redoStack;
+
+    QSet<int> sel;             // selected stroke indices; drawn on top, not in the cache
+    QPolygonF lasso;           // select gesture outline (Rect: first + last point), world mm
+    bool moving = false;       // select gesture drags the selection
+    QPointF dragFrom, dragBy;  // world mm
 
     QPixmap cache;             // pages + committed ink, rendered at cacheScale/cacheOffset
     double cacheScale = 0;

@@ -1,6 +1,7 @@
 #include "Sheet.h"
 #include <QLineF>
 #include <QPainter>
+#include <algorithm>
 
 // Calibration knob: share of the preset width drawn at zero pressure.
 static constexpr float kMinPressureWidth = 0.2f;
@@ -24,6 +25,27 @@ QPointF snap15(QPointF a, QPointF b) {
     l.setAngle(qRound(l.angle() / 15) * 15.0);
     return l.p2();
 }
+
+QRectF bounds(const Stroke &s) {
+    QPolygonF poly;
+    for (const Pt &p : s.pts) poly << p.pos();
+    double m = s.width / 2;
+    return poly.boundingRect().adjusted(-m, -m, m, m);
+}
+
+QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area) {
+    QSet<int> in;
+    for (int i = 0; i < strokes.size(); ++i)
+        if (std::all_of(strokes[i].pts.begin(), strokes[i].pts.end(),
+                        [&](const Pt &p) { return area.containsPoint(p.pos(), Qt::OddEvenFill); }))
+            in.insert(i);
+    return in;
+}
+
+QDataStream &operator<<(QDataStream &d, const Pt &p) { return d << p.x << p.y << p.p << p.t; }
+QDataStream &operator>>(QDataStream &d, Pt &p) { return d >> p.x >> p.y >> p.p >> p.t; }
+QDataStream &operator<<(QDataStream &d, const Stroke &s) { return d << s.pts << s.color << s.width; }
+QDataStream &operator>>(QDataStream &d, Stroke &s) { return d >> s.pts >> s.color >> s.width; }
 
 void drawSegment(QPainter &p, const Stroke &s, int i) {
     const Pt &b = s.pts[i], &a = s.pts[qMax(i - 1, 0)];

@@ -1,5 +1,6 @@
 #undef NDEBUG   // asserts must run in Release builds too
 #include "Sheet.h"
+#include <QIODevice>
 #include <QLineF>
 #include <cassert>
 #include <cstdio>
@@ -20,6 +21,20 @@ int main() {
     assert(qAbs(b.y()) < 1e-9 && qAbs(b.x() - QLineF(0, 0, 10, 1).length()) < 1e-9);
     b = snap15({0, 0}, {10, -9});         // ~42° up -> 45°
     assert(qAbs(b.x() + b.y()) < 1e-9);
+
+    // selection: only strokes with every point inside
+    QList<Stroke> strokes{st, {{{3, 3, 1, 0}}, Qt::red, 1}, {{{3, 3, 1, 0}, {30, 3, 1, 0}}, Qt::red, 1}};
+    assert(strokesInside(strokes, QPolygonF(QRectF(-1, -1, 15, 15))) == QSet<int>({0, 1}));
+    assert(bounds(st) == QRectF(-0.5, -0.5, 11, 1));
+
+    // stroke serialization round-trip (clipboard now, sheet files later)
+    QByteArray bytes;
+    QDataStream out(&bytes, QIODevice::WriteOnly);
+    out << strokes;
+    QList<Stroke> back;
+    QDataStream in(bytes);
+    in >> back;
+    assert(back.size() == 3 && back[2].pts[1].x == 30 && back[1].color == Qt::red && back[0].width == 1);
 
     std::puts("selftest ok");
 }

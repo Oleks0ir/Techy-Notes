@@ -26,8 +26,8 @@ int main(int argc, char **argv) {
     };
 
     auto tools = new QActionGroup(&w);
-    const char *names[] = {"Pen", "Line", "Select", "Eraser"};
-    for (int i = 0; i < 4; ++i) addChoice(tools, names[i], [=] { canvas->tool = Canvas::Tool(i); });
+    const char *names[] = {"Pen", "Line", "Lasso", "Rect", "Eraser"};   // Canvas::Tool order
+    for (int i = 0; i < 5; ++i) addChoice(tools, names[i], [=] { canvas->tool = Canvas::Tool(i); });
     auto snap = tb->addAction("15°", [=](bool on) { canvas->snapLines = on; });
     snap->setCheckable(true);
     snap->setToolTip("Snap lines to 15° (or hold Shift)");
@@ -41,7 +41,7 @@ int main(int argc, char **argv) {
         QColor c(hex);
         QPixmap px(16, 16);
         px.fill(c);
-        addChoice(colors, c.name(), [=] { canvas->color = c; }, QIcon(px));
+        addChoice(colors, c.name(), [=] { canvas->setColor(c); }, QIcon(px));
     }
 
     tb->addSeparator();
@@ -65,6 +65,11 @@ int main(int argc, char **argv) {
     tb->addSeparator();
     tb->addAction("Undo", [=] { canvas->undo(); })->setShortcut(QKeySequence::Undo);
     tb->addAction("Redo", [=] { canvas->redo(); })->setShortcut(QKeySequence::Redo);
+    tb->addSeparator();
+    tb->addAction("Cut", [=] { canvas->copySelection(); canvas->deleteSelection(); })->setShortcut(QKeySequence::Cut);
+    tb->addAction("Copy", [=] { canvas->copySelection(); })->setShortcut(QKeySequence::Copy);
+    tb->addAction("Paste", [=] { canvas->paste(); })->setShortcut(QKeySequence::Paste);
+    tb->addAction("Delete", [=] { canvas->deleteSelection(); })->setShortcut(QKeySequence::Delete);
 
     auto dock = new QDockWidget("Notebooks");
     dock->setFeatures(QDockWidget::NoDockWidgetFeatures);

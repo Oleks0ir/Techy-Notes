@@ -1,7 +1,9 @@
 #pragma once
 #include <QColor>
+#include <QDataStream>
 #include <QList>
 #include <QPoint>
+#include <QPolygonF>
 #include <QRectF>
 #include <QSet>
 
@@ -26,5 +28,12 @@ struct Sheet {
 
 bool hits(const Stroke &s, QPointF p, float radius);   // p within radius (mm) of the stroke's ink
 QPointF snap15(QPointF a, QPointF b);                  // b rotated around a to the nearest 15° step
+QRectF bounds(const Stroke &s);                        // ink bounds incl. width
+QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area);   // all points inside
 void drawSegment(QPainter &p, const Stroke &s, int i); // segment ending at point i (a dot for i == 0)
 void drawStroke(QPainter &p, const Stroke &s);         // painter in mm coordinates
+
+QDataStream &operator<<(QDataStream &d, const Pt &p);
+QDataStream &operator>>(QDataStream &d, Pt &p);
+QDataStream &operator<<(QDataStream &d, const Stroke &s);
+QDataStream &operator>>(QDataStream &d, Stroke &s);

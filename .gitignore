@@ -5,3 +5,4 @@ out/
 CMakeUserPresets.json
 .env
 .claude/settings.local.json
+COMMITMSG.txt

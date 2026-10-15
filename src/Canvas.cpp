@@ -1,9 +1,12 @@
 #include "Canvas.h"
+#include <QClipboard>
 #include <QDateTime>
+#include <QMimeData>
 #include <QGuiApplication>
 #include <QPainter>
 #include <QTouchEvent>
 #include <QtMath>
+#include <algorithm>
 
 static const QColor kBackground(0x5a, 0x5a, 0x5a);
 
@@ -83,7 +86,8 @@ void Canvas::renderCache() {
         p.drawRect(r);
     }
     // ponytail: redraws every stroke, tile cache / spatial index when big sheets stutter
-    for (const Stroke &s : sheet.strokes) drawStroke(p, s);
+    for (int i = 0; i < sheet.strokes.size(); ++i)
+        if (!sel.contains(i)) drawStroke(p, sheet.strokes[i]);
     if (active == Pen) drawStroke(p, cur);
 }
 
@@ -116,13 +120,39 @@ void Canvas::paintEvent(QPaintEvent *) {
         p.scale(f, f);
     }
     p.drawPixmap(0, 0, cache);
-    if (active == Line) {
-        p.resetTransform();
-        p.setRenderHint(QPainter::Antialiasing);
-        p.translate(offset);
-        p.scale(scale, scale);
-        drawStroke(p, cur);
+    p.resetTransform();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.translate(offset);
+    p.scale(scale, scale);
+    if (active == Line) drawStroke(p, cur);
+    if (!sel.isEmpty()) {
+        p.save();
+        p.translate(dragBy);
+        for (int i : sel) drawStroke(p, sheet.strokes[i]);
+        p.restore();
+        p.setPen(QPen(QColor(0x1565c0), 0, Qt::DashLine));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(selBounds().translated(dragBy));
     }
+    if ((active == Lasso || active == Rect) && !moving && !lasso.isEmpty()) {
+        p.setPen(QPen(Qt::darkGray, 0, Qt::DashLine));
+        p.setBrush(Qt::NoBrush);
+        if (active == Rect) p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
+        else p.drawPolyline(lasso);
+    }
+}
+
+void Canvas::select(const QSet<int> &s) {
+    if (s.isEmpty() && sel.isEmpty()) return;
+    sel = s;
+    cacheDirty = true;   // selected strokes leave/rejoin the cache
+    update();
+}
+
+QRectF Canvas::selBounds() const {
+    QRectF b;
+    for (int i : sel) b |= bounds(sheet.strokes[i]);
+    return b;
 }
 
 void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
@@ -131,6 +161,17 @@ void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     changed = false;
     QPointF w = toWorld(s);
     Pt pt{float(w.x()), float(w.y()), pr, t};
+    if (tl == Lasso || tl == Rect) {
+        moving = !sel.isEmpty() && selBounds().contains(w);
+        dragFrom = w;
+        dragBy = {};
+        if (!moving) {
+            select({});
+            lasso = {w};
+        }
+        return;
+    }
+    select({});
     if (tl == Pen) {
         cur = {{pt}, color, width};
         paintIntoCache(cur, 0);
@@ -153,6 +194,10 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
         update();
     } else if (active == Eraser) {
         erase(w);
+    } else if (active == Lasso || active == Rect) {
+        if (moving) dragBy = w - dragFrom;
+        else lasso << w;
+        update();
     }
 }
 
@@ -161,13 +206,82 @@ void Canvas::end() {
         sheet.strokes.append(cur);
         if (active == Line) paintIntoCache(cur, 0);
         changed = true;
+    } else if (active == Lasso || active == Rect) {
+        if (moving && !dragBy.isNull()) {
+            for (int i : sel)
+                for (Pt &p : sheet.strokes[i].pts) { p.x += dragBy.x(); p.y += dragBy.y(); }
+            changed = true;
+        } else if (!moving) {
+            select(strokesInside(sheet.strokes, active == Rect ? QPolygonF(QRectF(lasso.first(), lasso.last()).normalized())
+                                                                 : lasso));
+        }
+        moving = false;
+        dragBy = {};
+        lasso.clear();
     }
     active = None;
     update();
-    if (!changed) return;
-    undoStack.append(before);
+    if (changed) pushUndo(before);
+}
+
+void Canvas::pushUndo(const QList<Stroke> &prev) {
+    undoStack.append(prev);
     if (undoStack.size() > 100) undoStack.removeFirst();
     redoStack.clear();
+}
+
+void Canvas::setColor(QColor c) {
+    color = c;
+    if (sel.isEmpty() || active != None) return;
+    QList<Stroke> prev = sheet.strokes;
+    for (int i : sel) sheet.strokes[i].color = c;
+    pushUndo(prev);
+    update();
+}
+
+static const char *kStrokesMime = "application/x-techy-draw-strokes";
+
+void Canvas::copySelection() {
+    if (sel.isEmpty()) return;
+    QList<Stroke> out;
+    for (int i : sel) out << sheet.strokes[i];
+    QByteArray bytes;
+    QDataStream(&bytes, QIODevice::WriteOnly) << qint32(1) << out;   // clipboard format version 1
+    auto md = new QMimeData;
+    md->setData(kStrokesMime, bytes);
+    QGuiApplication::clipboard()->setMimeData(md);
+}
+
+void Canvas::deleteSelection() {
+    if (sel.isEmpty() || active != None) return;
+    QList<Stroke> prev = sheet.strokes;
+    QList<int> idx = sel.values();
+    std::sort(idx.rbegin(), idx.rend());
+    for (int i : idx) sheet.strokes.removeAt(i);
+    pushUndo(prev);
+    select({});
+}
+
+void Canvas::paste() {
+    const QMimeData *md = QGuiApplication::clipboard()->mimeData();
+    if (!md || active != None) return;
+    QDataStream d(md->data(kStrokesMime));
+    qint32 version = 0;
+    QList<Stroke> in;
+    d >> version >> in;
+    if (d.status() != QDataStream::Ok || version != 1 || in.isEmpty()) return;
+    QRectF b;
+    for (const Stroke &s : in) b |= bounds(s);
+    QPointF by = toWorld(rect().center()) - b.center();   // paste centered in view
+    QList<Stroke> prev = sheet.strokes;
+    QSet<int> added;
+    for (Stroke &s : in) {
+        for (Pt &p : s.pts) { p.x += by.x(); p.y += by.y(); }
+        added.insert(sheet.strokes.size());
+        sheet.strokes << s;
+    }
+    pushUndo(prev);
+    select(added);
 }
 
 void Canvas::erase(QPointF w) {
@@ -182,6 +296,7 @@ void Canvas::undo() {
     if (undoStack.isEmpty() || active != None) return;
     redoStack.append(sheet.strokes);
     sheet.strokes = undoStack.takeLast();
+    sel.clear();
     cacheDirty = true;
     update();
 }
@@ -190,6 +305,7 @@ void Canvas::redo() {
     if (redoStack.isEmpty() || active != None) return;
     undoStack.append(sheet.strokes);
     sheet.strokes = redoStack.takeLast();
+    sel.clear();
     cacheDirty = true;
     update();
 }
