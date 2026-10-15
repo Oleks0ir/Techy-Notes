@@ -1,6 +1,7 @@
 #include "Canvas.h"
 #include <QClipboard>
 #include <QDateTime>
+#include <QMessageBox>
 #include <QMimeData>
 #include <QGuiApplication>
 #include <QPainter>
@@ -16,6 +17,38 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
     settle.setSingleShot(true);
     settle.setInterval(150);   // re-render this long after the last pan/zoom step
     connect(&settle, &QTimer::timeout, this, qOverload<>(&QWidget::update));
+    autosave.setSingleShot(true);
+    autosave.setInterval(1000);
+    connect(&autosave, &QTimer::timeout, this, &Canvas::save);
+    setEnabled(false);         // until a sheet is open
+}
+
+void Canvas::modified() {
+    dirty = true;
+    autosave.start();
+}
+
+void Canvas::save() {
+    autosave.stop();
+    if (!dirty || path.isEmpty()) return;
+    dirty = !saveSheet(sheet, path);
+    if (dirty) QMessageBox::warning(this, "Techy-Draw", "Could not save " + path);
+}
+
+bool Canvas::open(const QString &file) {
+    save();
+    if (dirty || active != None) return false;   // never drop unsaved ink
+    Sheet s;
+    bool ok = loadSheet(s, file);
+    sheet = s;
+    path = ok ? file : QString();
+    undoStack.clear();
+    redoStack.clear();
+    sel.clear();
+    cacheDirty = true;
+    setEnabled(ok);
+    update();
+    return ok;
 }
 
 void Canvas::viewChanged() {
@@ -230,6 +263,7 @@ void Canvas::pushUndo(const QList<Stroke> &prev) {
     undoStack.append(prev);
     if (undoStack.size() > 100) undoStack.removeFirst();
     redoStack.clear();
+    modified();
 }
 
 void Canvas::setColor(QColor c) {
@@ -298,6 +332,7 @@ void Canvas::undo() {
     if (undoStack.isEmpty() || active != None) return;
     redoStack.append(sheet.strokes);
     sheet.strokes = undoStack.takeLast();
+    modified();
     sel.clear();
     cacheDirty = true;
     update();
@@ -307,6 +342,7 @@ void Canvas::redo() {
     if (redoStack.isEmpty() || active != None) return;
     undoStack.append(sheet.strokes);
     sheet.strokes = redoStack.takeLast();
+    modified();
     sel.clear();
     cacheDirty = true;
     update();
@@ -348,13 +384,12 @@ void Canvas::mouseReleaseEvent(QMouseEvent *e) {
 void Canvas::tabletEvent(QTabletEvent *e) {
     lastPenMs = QDateTime::currentMSecsSinceEpoch();
     e->accept();   // accepting stops synthesized mouse events
-    if (e->type() == QEvent::TabletPress && active == None) {
-        bool eraserEnd = e->pointerType() == QPointingDevice::PointerType::Eraser;
-        // Calibration knob: which pen buttons count as "barrel" differs per device/driver.
-        bool barrel = barrelErases && (e->buttons() & (Qt::RightButton | Qt::MiddleButton));
-        begin(e->position(), e->pressure(), e->timestamp(), eraserEnd || barrel ? Eraser : tool);
+    float pr = qBound(0.f, float((e->pressure() - pressLow) / (pressHigh - pressLow)), 1.f);
+    if (e->type() == QEvent::TabletPress && active == None && !(e->buttons() & menuButtons)) {
+        bool eraser = e->pointerType() == QPointingDevice::PointerType::Eraser || (e->buttons() & eraserButtons);
+        begin(e->position(), pr, e->timestamp(), eraser ? Eraser : tool);
     } else if (e->type() == QEvent::TabletMove && active != None) {
-        move(e->position(), e->pressure(), e->timestamp());
+        move(e->position(), pr, e->timestamp());
     } else if (e->type() == QEvent::TabletRelease && active != None) {
         end();
     }

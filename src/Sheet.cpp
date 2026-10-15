@@ -1,6 +1,8 @@
 #include "Sheet.h"
+#include <QFile>
 #include <QLineF>
 #include <QPainter>
+#include <QSaveFile>
 #include <algorithm>
 
 // Calibration knob: share of the preset width drawn at zero pressure.
@@ -57,4 +59,30 @@ void drawSegment(QPainter &p, const Stroke &s, int i) {
 
 void drawStroke(QPainter &p, const Stroke &s) {
     for (int i = 0; i < s.pts.size(); ++i) drawSegment(p, s, i);
+}
+
+static constexpr qint32 kSheetVersion = 1;   // bump on any format change
+
+bool saveSheet(const Sheet &s, const QString &path) {
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    d << kSheetVersion << s.strokes << s.pages << s.page << s.exportQueue;
+    return d.status() == QDataStream::Ok && f.commit();
+}
+
+bool loadSheet(Sheet &s, const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    qint32 version = 0;
+    d >> version;
+    if (version != kSheetVersion) return false;
+    Sheet in;
+    d >> in.strokes >> in.pages >> in.page >> in.exportQueue;
+    if (d.status() != QDataStream::Ok) return false;
+    s = in;
+    return true;
 }

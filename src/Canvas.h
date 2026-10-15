@@ -8,11 +8,16 @@ class Canvas : public QWidget {
 public:
     enum Tool { Pen, Line, Lasso, Rect, Eraser, None } tool = Pen;
     Sheet sheet;
+    QString path;                // open sheet file; empty: none, canvas disabled
     QColor color = Qt::black;
     float width = 0.5;           // mm
     bool snapLines = false;      // toolbar toggle; Shift snaps too
     bool fingerDraws = false;    // toolbar toggle; off: one finger pans
-    bool barrelErases = true;    // ponytail: hardcoded pen button mapping, settings UI later
+    // Calibration knobs, set in Settings > Calibrate pen: side buttons and the pressure range of light..firm writing.
+    // Defaults = Surface Pro 7+ pen: eraser button switches the pen to eraser mode, right-click button = RightButton.
+    int eraserButtons = 0;                  // buttons that erase, besides the pen's own eraser mode
+    int menuButtons = Qt::RightButton;      // right-click: opens menus, does nothing on the canvas yet
+    float pressLow = 0, pressHigh = 1;
 
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
@@ -21,6 +26,8 @@ public:
     void copySelection();
     void deleteSelection();
     void paste();
+    bool open(const QString &file);   // saves the current sheet first; false: kept current sheet or load failed
+    void save();                 // writes pending changes now (autosave does it 1 s after the last change)
 
 protected:
     bool event(QEvent *e) override;
@@ -39,6 +46,7 @@ private:
     void end();
     void erase(QPointF world);
     void pushUndo(const QList<Stroke> &prev);
+    void modified();
     void select(const QSet<int> &s);
     QRectF selBounds() const;
     void renderCache();
@@ -67,5 +75,7 @@ private:
     double cacheScale = 0;
     QPointF cacheOffset;
     bool cacheDirty = true;
+    QTimer autosave;
+    bool dirty = false;        // changes not yet on disk
     QTimer settle;             // running while a pan/zoom gesture is in progress
 };

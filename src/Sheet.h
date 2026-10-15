@@ -6,6 +6,7 @@
 #include <QPolygonF>
 #include <QRectF>
 #include <QSet>
+#include <QString>
 
 class QPainter;
 
@@ -32,6 +33,8 @@ QRectF bounds(const Stroke &s);                        // ink bounds incl. width
 QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area);   // all points inside
 void drawSegment(QPainter &p, const Stroke &s, int i); // segment ending at point i (a dot for i == 0)
 void drawStroke(QPainter &p, const Stroke &s);         // painter in mm coordinates
+bool saveSheet(const Sheet &s, const QString &path);   // atomic (QSaveFile)
+bool loadSheet(Sheet &s, const QString &path);         // false: unreadable or other version, s untouched
 
 QDataStream &operator<<(QDataStream &d, const Pt &p);
 QDataStream &operator>>(QDataStream &d, Pt &p);

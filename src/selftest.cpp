@@ -2,6 +2,7 @@
 #include "Sheet.h"
 #include <QIODevice>
 #include <QLineF>
+#include <QTemporaryDir>
 #include <cassert>
 #include <cstdio>
 
@@ -35,6 +36,20 @@ int main() {
     QDataStream in(bytes);
     in >> back;
     assert(back.size() == 3 && back[2].pts[1].x == 30 && back[1].color == Qt::red && back[0].width == 1);
+
+    // sheet file round-trip
+    QTemporaryDir tmp;
+    Sheet sh;
+    sh.strokes = strokes;
+    sh.pages << QPoint(-1, 2);
+    sh.page = {148, 210};
+    sh.exportQueue = {{0, 0}, {-1, 2}};
+    assert(saveSheet(sh, tmp.filePath("a.tsheet")));
+    Sheet ld;
+    assert(loadSheet(ld, tmp.filePath("a.tsheet")));
+    assert(ld.strokes.size() == 3 && ld.strokes[2].pts[1].x == 30 && ld.pages == sh.pages && ld.page == sh.page &&
+           ld.exportQueue == sh.exportQueue);
+    assert(!loadSheet(ld, tmp.filePath("missing.tsheet")) && ld.pages == sh.pages);   // failed load leaves it untouched
 
     std::puts("selftest ok");
 }
