@@ -17,6 +17,7 @@ $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # compiler, CMake, Qt DLLs
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/selftest.exe     # model self-check (asserts)
+./build/inputtest.exe -platform offscreen   # simulated mouse/pen/touch on the canvas
 ./build/techy-draw.exe
 ```
 MSVC + official Qt kit also works: `cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"` (`QT_DIR` noted in `.env`),
@@ -88,6 +89,7 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 | `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
 | `src/selftest.cpp` | Assert-based checks of the model |
+| `src/inputtest.cpp` | Canvas checks with simulated mouse, pen and touch input |
 
 ## Milestones
 1. Window, toolbar, tree, canvas pan/zoom, page lines — tested on a real pen tablet right away.

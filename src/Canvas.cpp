@@ -2,22 +2,25 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDropEvent>
 #include <QMessageBox>
 #include <QMenu>
 #include <QMimeData>
-#include <QGuiApplication>
 #include <QPainter>
 #include <QTouchEvent>
 #include <QtMath>
 #include <algorithm>
 
 static const QColor kBackground(0x5a, 0x5a, 0x5a);
+static constexpr float kHighlightWidth = 5;    // mm. Calibration knob, like the alpha below
+static constexpr int kHighlightAlpha = 100;
 
 Canvas::Canvas(QWidget *parent) : QWidget(parent) {
     setAttribute(Qt::WA_AcceptTouchEvents);
     setTabletTracking(true);   // pen hover: palm rejection, "+" buttons
     setMouseTracking(true);    // mouse hover: "+" buttons
     setFocusPolicy(Qt::ClickFocus);
+    setAcceptDrops(true);      // image files and images
     settle.setSingleShot(true);
     settle.setInterval(150);   // re-render this long after the last pan/zoom step
     connect(&settle, &QTimer::timeout, this, qOverload<>(&QWidget::update));
@@ -155,9 +158,11 @@ void Canvas::renderCache() {
         p.fillRect(r, Qt::white);
         p.drawRect(r);
     }
-    // ponytail: redraws every stroke, tile cache / spatial index when big sheets stutter
+    // ponytail: checks every stroke, tile cache / spatial index when big sheets stutter
+    QList<Stroke> shown;
     for (int i = 0; i < sheet.strokes.size(); ++i)
-        if (!sel.contains(i)) drawStroke(p, sheet.strokes[i]);
+        if (!sel.contains(i)) shown << sheet.strokes[i];
+    drawStrokes(p, shown, QRectF(toWorld({0, 0}), toWorld(QPointF(size().width(), size().height()))));
     if (active == Pen) drawStroke(p, cur);
 }
 
@@ -200,23 +205,31 @@ void Canvas::paintEvent(QPaintEvent *) {
         p.setBrush(QColor(255, 255, 255, 40));
         p.drawRect(sheet.pageRect(ghost));
     }
-    if (active == Line) drawStroke(p, cur);
+    if (active == Line || active == Highlighter) drawStroke(p, cur);
     if (!sel.isEmpty()) {
+        QList<Stroke> picked;
+        for (int i : sel) picked << sheet.strokes[i];
         p.save();
-        p.translate(dragBy);
-        for (int i : sel) drawStroke(p, sheet.strokes[i]);
+        p.setTransform(selXf, true);
+        drawStrokes(p, picked, {});
         p.restore();
         p.setPen(QPen(QColor(0x1565c0), 0, Qt::DashLine));
         p.setBrush(Qt::NoBrush);
-        p.drawRect(selBounds().translated(dragBy));
+        p.drawRect(selXf.mapRect(selBounds()));
     }
-    if ((active == Lasso || active == Rect) && !moving && !lasso.isEmpty()) {
+    if ((active == Lasso || active == Rect || active == Snip) && !moving && !lasso.isEmpty()) {
         p.setPen(QPen(Qt::darkGray, 0, Qt::DashLine));
         p.setBrush(Qt::NoBrush);
-        if (active == Rect) p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
-        else p.drawPolyline(lasso);
+        if (active == Lasso) p.drawPolyline(lasso);
+        else p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
     }
     p.resetTransform();
+    if (!sel.isEmpty()) {   // resize handle, fixed screen size
+        QPointF h = selXf.map(selBounds().bottomRight()) * scale + offset;
+        p.setPen(QPen(QColor(0x1565c0), 2));
+        p.setBrush(Qt::white);
+        p.drawRect(QRectF(h - QPointF(7, 7), QSizeF(14, 14)));
+    }
     if (holdFired) {   // finger long-press armed: lift for the page menu
         p.setPen(QPen(QColor(0x1565c0), 3));
         p.setBrush(Qt::NoBrush);
@@ -246,18 +259,26 @@ QRectF Canvas::selBounds() const {
 }
 
 void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
+    QPointF w = toWorld(s);
+    bool onHandle = !sel.isEmpty() && QLineF(s, selBounds().bottomRight() * scale + offset).length() < 20;
+    bool grab = onHandle || (!sel.isEmpty() && selBounds().contains(w));
+    if (grab && (tl == Pen || tl == Highlighter || tl == Line)) tl = Lasso;   // drawing tools move/resize a selection too
     active = tl;
     plusOn = false;
     setFocus();   // Ctrl+Z now undoes ink, not a deletion in the notebook tree
     before = sheet.strokes;
     changed = false;
-    QPointF w = toWorld(s);
     Pt pt{float(w.x()), float(w.y()), pr, t};
+    if (tl == Snip) {
+        lasso = {w};
+        return;
+    }
     if (tl == Lasso || tl == Rect) {
         adding = QGuiApplication::keyboardModifiers() & (Qt::ShiftModifier | Qt::ControlModifier);
-        moving = !adding && !sel.isEmpty() && selBounds().contains(w);
+        moving = !adding && grab;
+        resizing = moving && onHandle;
         dragFrom = w;
-        dragBy = {};
+        selXf = {};
         if (!moving) {
             if (!adding) select({});
             lasso = {w};
@@ -268,6 +289,12 @@ void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     if (tl == Pen) {
         cur = {{pt}, color, width};
         paintIntoCache(cur, 0);
+    } else if (tl == Highlighter) {   // drawn live on top, under the ink once done
+        QColor h = color;
+        h.setAlpha(kHighlightAlpha);
+        pt.p = 1;
+        cur = {{pt}, h, kHighlightWidth};
+        update();
     } else if (tl == Line) {
         pt.p = 1;
         cur = {{pt, pt}, color, width};
@@ -281,37 +308,59 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
     if (active == Pen) {
         cur.pts.append({float(w.x()), float(w.y()), pr, t});
         paintIntoCache(cur, cur.pts.size() - 1);
+    } else if (active == Highlighter) {
+        cur.pts.append({float(w.x()), float(w.y()), 1, t});
+        update();
     } else if (active == Line) {
         if (snapLines || QGuiApplication::keyboardModifiers() & Qt::ShiftModifier) w = snap15(cur.pts[0].pos(), w);
         cur.pts[1] = {float(w.x()), float(w.y()), 1, t};
         update();
     } else if (active == Eraser) {
         erase(w);
-    } else if (active == Lasso || active == Rect) {
-        if (moving) dragBy = w - dragFrom;
-        else lasso << w;
+    } else if (active == Lasso || active == Rect || active == Snip) {
+        if (resizing) {   // uniform scale about the top-left corner, following the handle along the diagonal
+            QPointF tl = selBounds().topLeft(), a = dragFrom - tl;
+            double f = qMax(0.05, QPointF::dotProduct(w - tl, a) / qMax(QPointF::dotProduct(a, a), 1e-6));
+            selXf = QTransform().translate(tl.x(), tl.y()).scale(f, f).translate(-tl.x(), -tl.y());
+        } else if (moving) {
+            selXf = QTransform::fromTranslate(w.x() - dragFrom.x(), w.y() - dragFrom.y());
+        } else {
+            lasso << w;
+        }
         update();
     }
 }
 
 void Canvas::end() {
-    if (active == Pen || (active == Line && cur.pts[0].pos() != cur.pts[1].pos())) {
+    if (active == Pen || active == Highlighter || (active == Line && cur.pts[0].pos() != cur.pts[1].pos())) {
         sheet.strokes.append(cur);
         if (autoPages) sheet.pages |= inkCells(sheet, cur, true);   // writing near a page bottom adds the page below
         if (active == Line) paintIntoCache(cur, 0);
+        if (active == Highlighter) cacheDirty = true;   // goes under the ink
         changed = true;
+    } else if (active == Snip) {
+        QRectF r = QRectF(lasso.first(), lasso.last()).normalized();
+        if (!r.isEmpty()) QGuiApplication::clipboard()->setImage(snapshot(sheet.strokes, r));
+        lasso.clear();
     } else if (active == Lasso || active == Rect) {
-        if (moving && !dragBy.isNull()) {
-            for (int i : sel)
-                for (Pt &p : sheet.strokes[i].pts) { p.x += dragBy.x(); p.y += dragBy.y(); }
+        if (moving && !selXf.isIdentity()) {
+            for (int i : sel) {
+                Stroke &st = sheet.strokes[i];
+                for (Pt &p : st.pts) {
+                    QPointF q = selXf.map(p.pos());
+                    p.x = q.x();
+                    p.y = q.y();
+                }
+                st.width *= selXf.m11();   // resize scales the ink width too
+            }
             changed = true;
         } else if (!moving) {
             QSet<int> in = strokesInside(sheet.strokes, active == Rect ? QPolygonF(QRectF(lasso.first(), lasso.last()).normalized())
                                                                          : lasso);
             select(adding ? in | sel : in);
         }
-        moving = false;
-        dragBy = {};
+        moving = resizing = false;
+        selXf = {};
         lasso.clear();
     }
     active = None;
@@ -323,8 +372,8 @@ void Canvas::cancel() {
     if (active == None) return;
     sheet.strokes = before;   // drops the live stroke, restores erased strokes and moved selections
     active = None;
-    moving = false;
-    dragBy = {};
+    moving = resizing = false;
+    selXf = {};
     lasso.clear();
     cacheDirty = true;
     update();
@@ -341,7 +390,11 @@ void Canvas::setColor(QColor c) {
     color = c;
     if (sel.isEmpty() || active != None) return;
     QList<Stroke> prev = sheet.strokes;
-    for (int i : sel) sheet.strokes[i].color = c;
+    for (int i : sel) {
+        QColor k = c;
+        k.setAlpha(sheet.strokes[i].color.alpha());   // a highlight stays one
+        sheet.strokes[i].color = k;
+    }
     pushUndo(prev);
     update();
 }
@@ -353,9 +406,10 @@ void Canvas::copySelection() {
     QList<Stroke> out;
     for (int i : sel) out << sheet.strokes[i];
     QByteArray bytes;
-    QDataStream(&bytes, QIODevice::WriteOnly) << qint32(1) << out;   // clipboard format version 1
+    QDataStream(&bytes, QIODevice::WriteOnly) << qint32(2) << out;   // clipboard format version = sheet's stroke format
     auto md = new QMimeData;
     md->setData(kStrokesMime, bytes);
+    md->setImageData(snapshot(out, selBounds()));   // for other apps
     QGuiApplication::clipboard()->setMimeData(md);
 }
 
@@ -372,11 +426,13 @@ void Canvas::deleteSelection() {
 void Canvas::paste() {
     const QMimeData *md = QGuiApplication::clipboard()->mimeData();
     if (!md || active != None) return;
+    if (!md->hasFormat(kStrokesMime) && md->hasImage())   // a screenshot
+        return addImage(qvariant_cast<QImage>(md->imageData()), toWorld(rect().center()));
     QDataStream d(md->data(kStrokesMime));
     qint32 version = 0;
     QList<Stroke> in;
     d >> version >> in;
-    if (d.status() != QDataStream::Ok || version != 1 || in.isEmpty()) return;
+    if (d.status() != QDataStream::Ok || version != 2 || in.isEmpty()) return;
     QRectF b;
     for (const Stroke &s : in) b |= bounds(s);
     QPointF by = toWorld(rect().center()) - b.center();   // paste centered in view
@@ -389,6 +445,35 @@ void Canvas::paste() {
     }
     pushUndo(prev);
     select(added);
+}
+
+void Canvas::addImage(const QImage &img, QPointF center) {
+    if (img.isNull() || active != None) return;
+    QString id = storeImage(img);
+    if (id.isEmpty()) return (void)QMessageBox::warning(this, "Techy-Draw", "Could not store the image in " + imageDir);
+    QSizeF mm = QSizeF(img.size()) * 25.4 / 96 / devicePixelRatioF();   // about its size on screen
+    QSizeF fit = sheet.page * 0.9;
+    if (mm.width() > fit.width() || mm.height() > fit.height()) mm.scale(fit, Qt::KeepAspectRatio);
+    QPointF a = center - QPointF(mm.width(), mm.height()) / 2, b = a + QPointF(mm.width(), mm.height());
+    QList<Stroke> prev = sheet.strokes;
+    sheet.strokes << Stroke{{{float(a.x()), float(a.y()), 1, 0}, {float(b.x()), float(b.y()), 1, 0}}, Qt::black, 0, id};
+    pushUndo(prev);
+    select({int(sheet.strokes.size() - 1)});
+}
+
+void Canvas::dragEnterEvent(QDragEnterEvent *e) {
+    if (e->mimeData()->hasImage() || e->mimeData()->hasUrls()) e->acceptProposedAction();
+}
+
+void Canvas::dropEvent(QDropEvent *e) {
+    QPointF at = toWorld(e->position());
+    if (e->mimeData()->hasImage()) return addImage(qvariant_cast<QImage>(e->mimeData()->imageData()), at);
+    for (const QUrl &u : e->mimeData()->urls()) {   // image files; anything else is skipped
+        QImage img(u.toLocalFile());
+        if (img.isNull()) continue;
+        addImage(img, at);
+        at += QPointF(10, 10);
+    }
 }
 
 void Canvas::erase(QPointF w) {

@@ -1,6 +1,7 @@
 #pragma once
 #include <QColor>
 #include <QDataStream>
+#include <QImage>
 #include <QList>
 #include <QPoint>
 #include <QPolygonF>
@@ -15,7 +16,19 @@ struct Pt {                                                    // mm, pressure 0
     float x, y, p; qint64 t;
     QPointF pos() const { return {x, y}; }
 };
-struct Stroke { QList<Pt> pts; QColor color; float width; };   // a line is a 2-point stroke
+// A line is a 2-point stroke. color alpha < 255: highlighter (drawn under the ink, no pressure).
+// img set: an image from the store filling the rectangle pts[0]..pts[1]; selected, moved, undone like ink.
+struct Stroke {
+    QList<Pt> pts; QColor color; float width;
+    QString img;          // image id (imageOf), empty for ink
+    bool locked = false;  // not selectable (imported PDF page backgrounds)
+};
+
+// Notebook-wide image store, <notebook root>/.images/<id>.png; set at startup.
+// ponytail: images are never deleted from the store; collect unreferenced ones if the folder grows too big
+inline QString imageDir;
+QString storeImage(const QImage &img);   // writes it once (id = content hash); empty: failed
+QImage imageOf(const QString &id);       // cached decode; null if missing
 
 struct Sheet {
     QList<Stroke> strokes;
@@ -35,6 +48,8 @@ QRectF bounds(const Stroke &s);                        // ink bounds incl. width
 QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area);   // all points inside
 void drawSegment(QPainter &p, const Stroke &s, int i); // segment ending at point i (a dot for i == 0)
 void drawStroke(QPainter &p, const Stroke &s);         // painter in mm coordinates
+void drawStrokes(QPainter &p, const QList<Stroke> &all, const QRectF &area);   // images, highlighter, ink on top; area null: all
+QImage snapshot(const QList<Stroke> &all, const QRectF &area);                 // area on white, ~150 dpi
 bool saveSheet(const Sheet &s, const QString &path);   // atomic (QSaveFile)
 bool loadSheet(Sheet &s, const QString &path);         // false: unreadable or other version, s untouched
 // Cells holding the stroke's points, segments resampled every 2 mm (a diagonal's bbox corners do not count).

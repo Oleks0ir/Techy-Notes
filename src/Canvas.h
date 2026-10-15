@@ -3,11 +3,12 @@
 #include <QElapsedTimer>
 #include <QPixmap>
 #include <QTimer>
+#include <QTransform>
 #include <QWidget>
 
 class Canvas : public QWidget {
 public:
-    enum Tool { Pen, Line, Lasso, Rect, Eraser, None } tool = Pen;
+    enum Tool { Pen, Highlighter, Line, Lasso, Rect, Snip, Eraser, None } tool = Pen;   // Snip: copies a rectangle as an image
     Sheet sheet;
     QString path;                // open sheet file; empty: none, canvas disabled
     QColor color = Qt::black;
@@ -43,6 +44,8 @@ protected:
     void mouseMoveEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
     void tabletEvent(QTabletEvent *e) override;
+    void dragEnterEvent(QDragEnterEvent *e) override;
+    void dropEvent(QDropEvent *e) override;
 
 private:
     void zoomAt(QPointF anchor, double factor);
@@ -52,6 +55,7 @@ private:
     void end();
     void cancel();               // drops the gesture in progress without an undo step
     void erase(QPointF world);
+    void addImage(const QImage &img, QPointF center);   // world mm; shrunk to fit a page, selected
     void pushUndo(const QList<Stroke> &prev);
     void modified();             // after any sheet edit: pages/queue follow the ink, autosave
     void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
@@ -78,9 +82,11 @@ private:
 
     QSet<int> sel;             // selected stroke indices; drawn on top, not in the cache
     QPolygonF lasso;           // select gesture outline (Rect: first + last point), world mm
-    bool moving = false;       // select gesture drags the selection
+    bool moving = false;       // select gesture moves or resizes the selection
+    bool resizing = false;     // ... by its corner handle
     bool adding = false;       // select gesture adds to the selection (Shift/Ctrl held)
-    QPointF dragFrom, dragBy;  // world mm
+    QPointF dragFrom;          // world mm
+    QTransform selXf;          // selection move/resize in progress, world mm
 
     QPixmap cache;             // pages + committed ink, rendered at cacheScale/cacheOffset
     double cacheScale = 0;

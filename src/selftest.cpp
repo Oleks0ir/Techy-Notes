@@ -114,5 +114,35 @@ int main() {
     assert(pdfOf({{1, 0}, {7, 7}}).contains("/Count 2"));                                 // subset + a blank page
     assert(!exportPdf(g, {}, tmp.filePath("b.pdf")));                                      // nothing to export
 
+    // images: stored once by content, every page under the rectangle is inked, locked ones are not selectable
+    imageDir = tmp.filePath("images");
+    QImage red(40, 20, QImage::Format_RGB32);
+    red.fill(Qt::red);
+    QString id = storeImage(red);
+    assert(!id.isEmpty() && storeImage(red) == id && imageOf(id).size() == QSize(40, 20) && imageOf("nope").isNull());
+    g = Sheet{};
+    Stroke pic{{{200, 10, 1, 0}, {230, 300, 1, 0}}, Qt::black, 0, id};
+    assert(inkCells(g, pic) == QSet<QPoint>({{0, 0}, {1, 0}, {0, 1}, {1, 1}}));
+    assert(!hits(pic, {210, 100}, 1));                                         // the eraser skips images
+    Stroke bg{{{0, 0, 1, 0}, {210, 297, 1, 0}}, Qt::black, 0, id, true};
+    assert(inkCells(g, bg) == QSet<QPoint>({{0, 0}}));                          // exactly one page
+    assert(strokesInside({bg, pic}, QPolygonF(QRectF(-1, -1, 400, 400))) == QSet<int>({1}));
+    g.strokes = {bg};
+    assert(saveSheet(g, tmp.filePath("i.tsheet")) && loadSheet(ld, tmp.filePath("i.tsheet")) && ld.strokes[0].img == id && ld.strokes[0].locked);
+    assert(snapshot(g.strokes, QRectF(0, 0, 10, 5)).pixelColor(30, 15) == QColor(Qt::red));
+    // the highlighter goes under the ink even when drawn later
+    QList<Stroke> marked{line(0, 5, 20, 5), {{{10, 0, 1, 0}, {10, 10, 1, 0}}, QColor(255, 255, 0, 100), 5}};
+    assert(snapshot(marked, QRectF(0, 0, 20, 10)).pixelColor(60, 30) == QColor(Qt::black));
+
+    // version 1 sheets (no images) still load
+    {
+        QFile v1(tmp.filePath("v1.tsheet"));
+        assert(v1.open(QIODevice::WriteOnly));
+        QDataStream d(&v1);
+        d.setVersion(QDataStream::Qt_6_0);
+        d << qint32(1) << quint32(1) << st.pts << st.color << st.width << sh.pages << sh.page << sh.exportQueue;
+    }
+    assert(loadSheet(ld, tmp.filePath("v1.tsheet")) && ld.strokes.size() == 1 && ld.strokes[0].pts[1].x == 10 &&
+           ld.strokes[0].img.isEmpty() && ld.pages == sh.pages && ld.exportQueue == sh.exportQueue);
     std::puts("selftest ok");
 }

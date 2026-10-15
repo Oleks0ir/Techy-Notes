@@ -386,8 +386,9 @@ int main(int argc, char **argv) {
     };
 
     auto tools = new QActionGroup(&w);
-    const char *names[] = {"Pen", "Line", "Lasso", "Rect", "Eraser"};   // Canvas::Tool order
-    for (int i = 0; i < 5; ++i) addChoice(tools, names[i], [=] { canvas->tool = Canvas::Tool(i); });
+    const char *names[] = {"Pen", "Highlighter", "Line", "Lasso", "Rect", "Snip", "Eraser"};   // Canvas::Tool order
+    for (int i = 0; i < 7; ++i) addChoice(tools, names[i], [=] { canvas->tool = Canvas::Tool(i); });
+    tools->actions()[Canvas::Snip]->setToolTip("Drag a rectangle to copy that area as an image");
     auto snap = tb->addAction("15°", [=](bool on) { canvas->snapLines = on; });
     snap->setCheckable(true);
     snap->setToolTip("Snap lines to 15° (or hold Shift)");
@@ -397,7 +398,7 @@ int main(int argc, char **argv) {
 
     tb->addSeparator();
     auto colors = new QActionGroup(&w);
-    for (const char *hex : {"#000000", "#1565c0", "#c62828", "#2e7d32"}) {
+    for (const char *hex : {"#000000", "#1565c0", "#c62828", "#2e7d32", "#fdd835"}) {
         QColor c(hex);
         QPixmap px(16, 16);
         px.fill(c);
@@ -437,6 +438,7 @@ int main(int argc, char **argv) {
         QDir().mkpath(rootDir + "/Notebook 1");
         saveSheet(Sheet{}, rootDir + "/Notebook 1/Sheet 1" + kExt);
     }
+    imageDir = rootDir + "/.images";   // hidden from the tree like the trash
     auto model = new QStandardItemModel(&w);
     QStandardItem *root = model->invisibleRootItem();
     fill(root, rootDir);

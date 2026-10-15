@@ -10,6 +10,7 @@ No web tech, no new dependencies without asking.
 - `cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release`
 - `cmake --build build`
 - `./build/selftest.exe` — must pass after model changes.
+- `./build/inputtest.exe -platform offscreen` — must pass after canvas changes (still verify on the tablet).
 
 ## Conventions
 - Minimal code: prefer Qt built-ins over custom code; keep the small file layout from README.md.
