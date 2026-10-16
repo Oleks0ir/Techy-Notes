@@ -40,7 +40,7 @@ static const QHash<QString, QString> kWanted = [] {
     return m;
 }();
 
-struct Sample { QString sym; QList<QPolygonF> strokes; };
+struct Sample { QString sym; QList<QPolygonF> strokes; QString writer; };
 
 // Drawn shapes for what HWRT lacks, n jittered variants each
 static QList<Sample> drawn(int n, quint32 seed) {
@@ -68,7 +68,6 @@ static QList<Sample> drawn(int n, quint32 seed) {
     return out;
 }
 
-// sym is "<symbol>\x01<writer id>"; main splits it
 static QList<Sample> readCsv(const QString &path, const QHash<QString, QString> &symOf) {
     QList<Sample> out;
     QFile f(path);
@@ -78,7 +77,7 @@ static QList<Sample> readCsv(const QString &path, const QHash<QString, QString> 
         if (a < 0 || b < 0 || c < 0) continue;
         QString sym = symOf.value(line.left(a));
         if (sym.isEmpty()) continue;
-        Sample s{sym + "\x01" + QString::fromLatin1(line.mid(a + 1, b - a - 1)), {}};
+        Sample s{sym, {}, QString::fromLatin1(line.mid(a + 1, b - a - 1))};
         for (const QJsonValue &st : QJsonDocument::fromJson(line.mid(b + 1, c - b - 1)).array()) {
             QPolygonF poly;
             for (const QJsonValue &p : st.toArray()) poly << QPointF(p["x"].toDouble(), p["y"].toDouble());
@@ -109,12 +108,10 @@ int main(int argc, char **argv) {
     QHash<QString, QSet<QString>> writers;
     QHash<QString, QList<int>> bySym;
     for (int i = 0; i < train.size(); ++i) {
-        QString sym = train[i].sym.section('\x01', 0, 0), user = train[i].sym.section('\x01', 1);
-        train[i].sym = sym;
-        if (bySym[sym].size() < kTrainCap) bySym[sym] << i;
-        if (writers[sym].size() < kPerSymbol && !writers[sym].contains(user)) writers[sym].insert(user), tpl << makeTemplate(sym, train[i].strokes);
+        const Sample &s = train[i];
+        if (bySym[s.sym].size() < kTrainCap) bySym[s.sym] << i;
+        if (writers[s.sym].size() < kPerSymbol && !writers[s.sym].contains(s.writer)) writers[s.sym].insert(s.writer), tpl << makeTemplate(s.sym, s.strokes);
     }
-    for (Sample &s : test) s.sym = s.sym.section('\x01', 0, 0);
     for (const Sample &s : drawn(6, 42)) tpl << makeTemplate(s.sym, s.strokes);
     for (const Sample &s : drawn(kTrainMin, 7)) bySym[s.sym] << int(train.size()), train << s;
     test << drawn(30, 99);
@@ -128,9 +125,9 @@ int main(int argc, char **argv) {
     const int D = m.d, H = m.h, C = int(m.classes.size());
     std::mt19937 rng(1);
     std::normal_distribution<float> gauss(0, 1);
-    m.w1.resize(size_t(H) * D);
+    m.w1.resize(qsizetype(H) * D);
     m.b1.assign(H, 0);
-    m.w2.resize(size_t(C) * H);
+    m.w2.resize(qsizetype(C) * H);
     m.b2.assign(C, 0);
     for (float &w : m.w1) w = gauss(rng) * std::sqrt(2.f / D);   // He initialisation
     for (float &w : m.w2) w = gauss(rng) * std::sqrt(1.f / H);
@@ -163,7 +160,7 @@ int main(int argc, char **argv) {
 
     // Adam, minibatches, every symbol at least kTrainMin times a pass (small ones repeated, distorted anew)
     std::vector<float *> params{m.w1.data(), m.b1.data(), m.w2.data(), m.b2.data()};
-    std::vector<size_t> sizes{m.w1.size(), m.b1.size(), m.w2.size(), m.b2.size()};
+    std::vector<qsizetype> sizes{m.w1.size(), m.b1.size(), m.w2.size(), m.b2.size()};
     std::vector<std::vector<float>> g(4), m1(4), m2(4);
     for (int k = 0; k < 4; ++k) g[k].resize(sizes[k]), m1[k].resize(sizes[k]), m2[k].resize(sizes[k]);
     int step = 0;
@@ -179,14 +176,7 @@ int main(int argc, char **argv) {
             int n = std::min<int>(kBatch, int(order.size()) - at);
             for (int b = 0; b < n; ++b) {
                 const Sample &s = train[order[at + b]];
-                std::vector<float> x = inkFeatures(distort(s.strokes)), h(H);
-                for (int j = 0; j < H; ++j) {
-                    float v = m.b1[j];
-                    const float *w = &m.w1[size_t(j) * D];
-                    for (int i = 0; i < D; ++i) v += w[i] * x[i];
-                    h[j] = v > 0 ? v : 0;
-                }
-                std::vector<float> p = mlpProbs(m, x), dh(H, 0);
+                std::vector<float> x = inkFeatures(distort(s.strokes)), h = hiddenOf(m, x), p = outputOf(m, h), dh(H, 0);
                 int c = classOf[s.sym];
                 loss -= std::log(std::max(p[c], 1e-12f));
                 for (int k = 0; k < C; ++k) {
@@ -206,7 +196,7 @@ int main(int argc, char **argv) {
             ++step;
             float c1 = 1 - std::pow(0.9f, step), c2 = 1 - std::pow(0.999f, step);
             for (int k = 0; k < 4; ++k)
-                for (size_t i = 0; i < sizes[k]; ++i) {
+                for (qsizetype i = 0; i < sizes[k]; ++i) {
                     float gi = g[k][i] / n;
                     m1[k][i] = 0.9f * m1[k][i] + 0.1f * gi;
                     m2[k][i] = 0.999f * m2[k][i] + 0.001f * gi * gi;

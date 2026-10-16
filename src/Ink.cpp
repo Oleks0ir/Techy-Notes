@@ -54,32 +54,6 @@ QPolygonF resample(const QList<QPolygonF> &strokes, int n, QList<int> *strokeOf 
     return out;
 }
 
-std::vector<float> hiddenOf(const Mlp &m, const std::vector<float> &x) {
-    std::vector<float> h(m.h);
-    for (int j = 0; j < m.h; ++j) {
-        const float *w = &m.w1[size_t(j) * m.d];
-        float s = m.b1[j];
-        for (int i = 0; i < m.d; ++i) s += w[i] * x[i];
-        h[j] = s > 0 ? s : 0;
-    }
-    return h;
-}
-std::vector<float> outputOf(const Mlp &m, const std::vector<float> &h) {   // softmax
-    int c = int(m.classes.size());
-    std::vector<float> z(c);
-    float mx = -1e30f, sum = 0;
-    for (int k = 0; k < c; ++k) {
-        const float *w = &m.w2[size_t(k) * m.h];
-        float s = m.b2[k];
-        for (int j = 0; j < m.h; ++j) s += w[j] * h[j];
-        z[k] = s;
-        mx = std::max(mx, s);
-    }
-    for (float &v : z) sum += v = std::exp(v - mx);
-    for (float &v : z) v /= sum;
-    return z;
-}
-
 // The built-in classifier with its last layer retrained on the personal samples, plus kReplay built-in samples of
 // every symbol so the others are not forgotten. A personal symbol it does not know (a joined-up "sin") becomes a
 // new class. Recomputed only when the personal samples change.
@@ -168,6 +142,12 @@ QList<std::pair<double, QString>> classify(const QList<QPolygonF> &strokes, cons
     QList<std::pair<double, QString>> out;
     for (int k = 0; k < kCands && k < idx.size(); ++k) out.append({-std::log(std::max(p[idx[k]], 1e-12f)), m.classes[idx[k]]});
     return out;
+}
+// Calibration: x and × are one shape, either counts for the other (the layout tells them apart by their neighbours)
+std::vector<float> probsOf(const Mlp &m, const QList<QPolygonF> &strokes) {
+    std::vector<float> p = mlpProbs(m, inkFeatures(strokes));
+    if (qsizetype x = m.classes.indexOf("x"), t = m.classes.indexOf("×"); x >= 0 && t >= 0) p[x] = p[t] = p[x] + p[t];
+    return p;
 }
 bool flat(const QRectF &b) { return b.height() < 0.3 * b.width(); }   // "-", fraction bars, "="'s lines
 double median(QList<double> v) {
@@ -261,6 +241,39 @@ std::vector<float> inkFeatures(const QList<QPolygonF> &in) {
     return f;
 }
 
+QList<QPolygonF> inkOf(const QList<QPolygonF> &ink, const QList<int> &strokes) {
+    QList<QPolygonF> s;
+    for (int i : strokes) s << ink[i];
+    return s;
+}
+
+std::vector<float> hiddenOf(const Mlp &m, const std::vector<float> &x) {
+    std::vector<float> h(m.h);
+    for (int j = 0; j < m.h; ++j) {
+        const float *w = &m.w1[qsizetype(j) * m.d];
+        float s = m.b1[j];
+        for (int i = 0; i < m.d; ++i) s += w[i] * x[i];
+        h[j] = s > 0 ? s : 0;
+    }
+    return h;
+}
+
+std::vector<float> outputOf(const Mlp &m, const std::vector<float> &h) {
+    int c = int(m.classes.size());
+    std::vector<float> z(c);
+    float mx = -1e30f, sum = 0;
+    for (int k = 0; k < c; ++k) {
+        const float *w = &m.w2[qsizetype(k) * m.h];
+        float s = m.b2[k];
+        for (int j = 0; j < m.h; ++j) s += w[j] * h[j];
+        z[k] = s;
+        mx = std::max(mx, s);
+    }
+    for (float &v : z) sum += v = std::exp(v - mx);
+    for (float &v : z) v /= sum;
+    return z;
+}
+
 std::vector<float> mlpProbs(const Mlp &m, const std::vector<float> &features) { return outputOf(m, hiddenOf(m, features)); }
 
 Mlp loadMlp(const QString &path) {
@@ -272,15 +285,10 @@ Mlp loadMlp(const QString &path) {
     QByteArray magic;
     qint32 v = 0;
     Mlp m;
-    QList<float> w1, b1, w2, b2;
-    d >> magic >> v >> m.d >> m.h >> m.classes >> w1 >> b1 >> w2 >> b2;
+    d >> magic >> v >> m.d >> m.h >> m.classes >> m.w1 >> m.b1 >> m.w2 >> m.b2;
     qsizetype c = m.classes.size();
-    if (d.status() != QDataStream::Ok || magic != "MLP" || v != 1 || m.d != kFeatures || w1.size() != qsizetype(m.h) * m.d ||
-        b1.size() != m.h || w2.size() != c * m.h || b2.size() != c) return {};
-    m.w1.assign(w1.begin(), w1.end());
-    m.b1.assign(b1.begin(), b1.end());
-    m.w2.assign(w2.begin(), w2.end());
-    m.b2.assign(b2.begin(), b2.end());
+    if (d.status() != QDataStream::Ok || magic != "MLP" || v != 1 || m.d != kFeatures || m.w1.size() != qsizetype(m.h) * m.d ||
+        m.b1.size() != m.h || m.w2.size() != c * m.h || m.b2.size() != c) return {};
     return m;
 }
 
@@ -290,8 +298,7 @@ bool saveMlp(const Mlp &m, const QString &path) {
     QDataStream d(&f);
     d.setVersion(QDataStream::Qt_6_0);
     d.setFloatingPointPrecision(QDataStream::SinglePrecision);
-    auto list = [](const std::vector<float> &v) { return QList<float>(v.begin(), v.end()); };
-    d << QByteArray("MLP") << qint32(1) << qint32(m.d) << qint32(m.h) << m.classes << list(m.w1) << list(m.b1) << list(m.w2) << list(m.b2);
+    d << QByteArray("MLP") << qint32(1) << qint32(m.d) << qint32(m.h) << m.classes << m.w1 << m.b1 << m.w2 << m.b2;
     return d.status() == QDataStream::Ok && f.commit();
 }
 
@@ -352,11 +359,6 @@ struct Strokes {
     double dotSize;
     bool gapsOk = false;   // calibration, last resort: a gap inside a symbol only makes it 20x less likely
     bool dot(const QRectF &b) const { return std::max(b.width(), b.height()) < dotSize * h; }   // ponytail: calibration knob
-    QList<QPolygonF> inkOf(const QList<int> &g) const {
-        QList<QPolygonF> s;
-        for (int i : g) s << ink[i];
-        return s;
-    }
     // log bonus for a stroke with box b joining a symbol with box gb; kNever: it cannot
     double link(const QRectF &gb, const QRectF &b) const {
         double m = 0.05 * h, below = flat(b) && flat(gb) ? 0.8 * h : 0.3 * h;   // the bars of "=" are further apart
@@ -388,7 +390,7 @@ struct Strokes {
     QList<int> attachDots(QList<QList<int>> &groups, bool anywhere = false) const {
         QList<QRectF> boxes;
         QList<bool> dotted;
-        for (const QList<int> &g : groups) boxes << boxOf(inkOf(g)), dotted << false;
+        for (const QList<int> &g : groups) boxes << boxOf(inkOf(ink, g)), dotted << false;
         QList<int> left;
         for (int d : dots) {
             QRectF db = ink[d].boundingRect();
@@ -429,7 +431,7 @@ QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Templ
             QList<int> g = st.idx.mid(start, j - start);
             double bonus = st.bonus(g);
             if (bonus <= kNever || best[start] <= -1e17) continue;
-            auto cls = classify(st.inkOf(g), model);
+            auto cls = classify(inkOf(ink, g), model);
             double score = best[start] + bonus - (cls.isEmpty() ? 30 : cls[0].first);
             if (score > best[j]) best[j] = score, from[j] = start;
         }
@@ -444,17 +446,6 @@ QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Templ
     return out;
 }
 
-static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal, double dotSize, bool gapsOk);
-
-QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal) {
-    // dots bigger than recognition's go wherever they help most; if that leaves too few strokes (a small first
-    // stroke of an r taken for a dot): recognition's dots; if a symbol still cannot be one (an r whose arc has a
-    // gap to its stem): gaps allowed, at a price
-    for (auto [dotSize, gapsOk] : {std::pair{0.45, false}, {0.3, false}, {0.3, true}})
-        if (QList<QList<int>> g = alignSymbols(ink, expected, personal, dotSize, gapsOk); !g.isEmpty()) return g;
-    return {};
-}
-
 static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal, double dotSize, bool gapsOk) {
     // As recognizeSymbols, but into exactly the expected symbols, in order, each scored by its probability of
     // being the symbol it should be
@@ -465,15 +456,13 @@ static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QString
     if (N == 0 || n < N || m.d == 0) return {};
     QList<qsizetype> want;
     for (const QString &e : expected) want << m.classes.indexOf(e);
-    qsizetype x = m.classes.indexOf("x"), times = m.classes.indexOf("×");
     auto at = [&](int j, int k) { return size_t(j) * (N + 1) + k; };
     std::vector<double> f(size_t(n + 1) * (N + 1), -1e18);
     std::vector<int> from(f.size(), -1);
     f[at(0, 0)] = 0;
     // log-probability of strokes g being expected symbol k
     auto logp = [&](const QList<int> &g, int k) {
-        std::vector<float> p = mlpProbs(m, inkFeatures(st.inkOf(g)));
-        if (x >= 0 && times >= 0) p[x] = p[times] = p[x] + p[times];   // one shape
+        std::vector<float> p = probsOf(m, inkOf(ink, g));
         // a symbol it does not know yet (a new personal one): neither likely nor ruled out
         return want[k] < 0 ? std::log(0.05) : std::log(std::max(double(p[want[k]]), 1e-6));
     };
@@ -503,7 +492,7 @@ static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QString
         double gain = -1e18;
         for (int pass = 0; pass < 2 && best < 0; ++pass)
             for (int k = 0; k < N; ++k) {
-                QRectF gb = boxOf(st.inkOf(groups[k]));
+                QRectF gb = boxOf(inkOf(ink, groups[k]));
                 bool near = db.center().x() > gb.left() - 0.6 * st.h && db.center().x() < gb.right() + 0.6 * st.h &&
                             db.bottom() > gb.top() - 1.5 * st.h && db.top() < gb.bottom() + 0.3 * st.h;
                 if (pass == 0 && !near) continue;
@@ -516,6 +505,15 @@ static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QString
         std::sort(groups[best].begin(), groups[best].end());
     }
     return groups;
+}
+
+QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal) {
+    // dots bigger than recognition's go wherever they help most; if that leaves too few strokes (a small first
+    // stroke of an r taken for a dot): recognition's dots; if a symbol still cannot be one (an r whose arc has a
+    // gap to its stem): gaps allowed, at a price
+    for (auto [dotSize, gapsOk] : {std::pair{0.45, false}, {0.3, false}, {0.3, true}})
+        if (QList<QList<int>> g = alignSymbols(ink, expected, personal, dotSize, gapsOk); !g.isEmpty()) return g;
+    return {};
 }
 
 
@@ -630,8 +628,7 @@ struct Layout {
 }   // namespace
 
 InkSymbol symbolOf(const QList<QPolygonF> &ink, const QList<int> &strokes, const QList<Template> &personal) {
-    QList<QPolygonF> s;
-    for (int i : strokes) s << ink[i];
+    QList<QPolygonF> s = inkOf(ink, strokes);
     InkSymbol out{strokes, boxOf(s), {}, {}};
     for (const auto &[cost, sym] : classify(s, classifier(personal))) out.cands << sym, out.probs << std::exp(-cost);
     if (out.cands.isEmpty()) out.cands << "?", out.probs << 0;
@@ -641,10 +638,7 @@ InkSymbol symbolOf(const QList<QPolygonF> &ink, const QList<int> &strokes, const
 Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, const QList<Template> &personal) {
     const Mlp &m = classifier(personal);
     if (m.d == 0) return {"?", 0};
-    std::vector<float> p = mlpProbs(m, inkFeatures(strokes));
-    // x and × are one shape: either counts for the other (the layout tells them apart by their neighbours)
-    qsizetype x = m.classes.indexOf("x"), times = m.classes.indexOf("×");
-    if (x >= 0 && times >= 0) p[x] = p[times] = p[x] + p[times];
+    std::vector<float> p = probsOf(m, strokes);
     int best = int(std::max_element(p.begin(), p.end()) - p.begin());
     qsizetype e = m.classes.indexOf(expected);
     QString sym = m.classes[best];

@@ -560,11 +560,7 @@ static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, con
     QObject::connect(next, &QPushButton::clicked, [&] {   // Train or Next: either way the page is learned
         QStringList want = prompts[at].glyphs.split(' ');
         if (cols.size() != want.size()) return;
-        for (int k = 0; k < cols.size(); ++k) {
-            QList<QPolygonF> st;
-            for (int i : cols[k]) st << pad->ink[i];
-            personal << makeTemplate(want[k], st);
-        }
+        for (int k = 0; k < cols.size(); ++k) personal << makeTemplate(want[k], inkOf(pad->ink, cols[k]));
         if (!saveTemplates(personal, file)) QMessageBox::warning(&d, "Techy-Notes", "Could not save " + file);
         if (green) return (void)(++at == count ? d.accept() : load());
         ++round;
@@ -897,17 +893,21 @@ int main(int argc, char **argv) {
         rec->syms.clear();
         fillStrip();
     };
-    auto learn = [=, &w](const QString &sym, const QList<int> &strokes) {   // that ink is sym: a personal template
-        QList<QPolygonF> st;
-        for (int k : strokes) st << rec->ink[k];
-        rec->personal << makeTemplate(sym, st);
+    auto learn = [=, &w](InkSymbol &s, const QString &sym) {   // s is sym: its first candidate, and a personal template
+        s.cands.removeAll(sym);
+        s.cands.prepend(sym);
+        rec->personal << makeTemplate(sym, inkOf(rec->ink, s.strokes));
         if (!saveTemplates(rec->personal, personalFile)) QMessageBox::warning(&w, "Techy-Notes", "Could not save " + personalFile);
+    };
+    auto selected = [=] {   // the symbols picked in the strip
+        QList<int> picked;
+        for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
+        return picked;
     };
     // One selected: its alternatives. Several: type what they are, one character each ("sin" for three), or a
     // single symbol to merge them (one symbol read as two).
     QObject::connect(fix, &QPushButton::clicked, [=, &w] {
-        QList<int> picked;
-        for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
+        QList<int> picked = selected();
         std::sort(picked.begin(), picked.end(), [&](int a, int b) { return rec->syms[a].box.left() < rec->syms[b].box.left(); });
         QString typed;
         if (picked.size() == 1) {
@@ -930,17 +930,11 @@ int main(int argc, char **argv) {
             InkSymbol &s = rec->syms[picked[0]];
             for (int k = picked.size() - 1; k > 0; --k) s.strokes << rec->syms[picked[k]].strokes, s.box |= rec->syms[picked[k]].box;
             std::sort(s.strokes.begin(), s.strokes.end());
-            s.cands.removeAll(typed);
-            s.cands.prepend(typed);
-            learn(typed, s.strokes);
+            learn(s, typed);
             std::sort(picked.begin() + 1, picked.end(), std::greater<int>());
             for (int k = 1; k < picked.size(); ++k) rec->syms.removeAt(picked[k]);
         } else if (syms.size() == picked.size()) {
-            for (int k = 0; k < picked.size(); ++k) {
-                rec->syms[picked[k]].cands.removeAll(syms[k]);
-                rec->syms[picked[k]].cands.prepend(syms[k]);
-                learn(syms[k], rec->syms[picked[k]].strokes);
-            }
+            for (int k = 0; k < picked.size(); ++k) learn(rec->syms[picked[k]], syms[k]);
         } else {
             return (void)QMessageBox::information(&w, "Correct", QString("%1 symbols are selected, but \"%2\" has %3. Type one per symbol, or one to merge them.")
                                                                      .arg(picked.size()).arg(typed).arg(syms.size()));
@@ -949,8 +943,7 @@ int main(int argc, char **argv) {
         fillStrip();
     });
     QObject::connect(split, &QPushButton::clicked, [=] {   // wrongly joined: one symbol per stroke, classified anew
-        QList<int> picked;
-        for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
+        QList<int> picked = selected();
         std::sort(picked.begin(), picked.end(), std::greater<int>());
         for (int i : picked) {
             QList<int> strokes = rec->syms[i].strokes;
@@ -962,8 +955,7 @@ int main(int argc, char **argv) {
         fillStrip();
     });
     QObject::connect(drop, &QPushButton::clicked, [=] {   // stray ink: left out of the text, nothing learned
-        QList<int> picked;
-        for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
+        QList<int> picked = selected();
         std::sort(picked.begin(), picked.end(), std::greater<int>());
         for (int i : picked) rec->syms.removeAt(i);
         putText();
@@ -973,9 +965,7 @@ int main(int argc, char **argv) {
         int i = item->data(Qt::UserRole).toInt();
         QString typed = item->text().remove(' ');
         if (typed.isEmpty() || typed == rec->syms[i].cands.value(0)) return;
-        rec->syms[i].cands.removeAll(typed);
-        rec->syms[i].cands.prepend(typed);
-        learn(typed, rec->syms[i].strokes);
+        learn(rec->syms[i], typed);
         putText();
         QTimer::singleShot(0, strip, fillStrip);   // not while the edited item is still in use
     });

@@ -54,7 +54,7 @@ struct Sheet {
 
 bool hits(const Stroke &s, QPointF p, float radius);   // p within radius (mm) of the stroke's ink
 QPointF snap15(QPointF a, QPointF b);                  // b rotated around a to the nearest 15° step
-QRectF bounds(const Stroke &s);                        // ink bounds incl. width
+QRectF bounds(const Stroke &s);                        // ink bounds incl. width; a box object's rectangle (width 0)
 QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area);   // all points inside
 void drawSegment(QPainter &p, const Stroke &s, int i); // segment ending at point i (a dot for i == 0)
 void drawStroke(QPainter &p, const Stroke &s);         // painter in mm coordinates

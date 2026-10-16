@@ -254,12 +254,12 @@ void Canvas::paintEvent(QPaintEvent *) {
         const Stroke &st = sheet.strokes[trimIdx];
         p.setPen(QPen(QColor(0x1565c0), 3 / scale));
         p.setBrush(Qt::NoBrush);
-        p.drawRect(QRectF(st.pts[0].pos(), st.pts[1].pos()));
+        p.drawRect(bounds(st));
     }
     if (cropIdx >= 0) {   // crop frame; the part cut away is dimmed
         const Stroke &st = sheet.strokes[cropIdx];
         QPainterPath away, keep;
-        away.addRect(QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized());
+        away.addRect(bounds(st));
         keep.addRect(cropRect);
         p.fillPath(away.subtracted(keep), QColor(0, 0, 0, 110));
         p.setPen(QPen(QColor(0x1565c0), 3 / scale));
@@ -436,7 +436,7 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
         QRectF r = cropFrom;
         QPointF d = w - dragFrom;
         const Stroke &st = sheet.strokes[cropIdx];
-        QRectF box = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+        QRectF box = bounds(st);
         if (cropGrab == 1) r.setTopLeft(QPointF(qMin(r.left() + d.x(), r.right() - 1), qMin(r.top() + d.y(), r.bottom() - 1)));
         else if (cropGrab == 2) r.setBottomRight(QPointF(qMax(r.right() + d.x(), r.left() + 1), qMax(r.bottom() + d.y(), r.top() + 1)));
         else r.moveTo(qBound(box.left(), r.left() + d.x(), box.right() - r.width()), qBound(box.top(), r.top() + d.y(), box.bottom() - r.height()));
@@ -499,7 +499,7 @@ void Canvas::end() {
 
 bool Canvas::cropPicture(int i, QRectF r) {
     Stroke &st = sheet.strokes[i];
-    QRectF box = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+    QRectF box = bounds(st);
     r &= box;
     QImage img = imageOf(st.img);
     if (r.isEmpty() || r == box || img.isNull()) return false;
@@ -891,7 +891,7 @@ QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
     int img = -1;
     for (int i = sheet.strokes.size() - 1; i >= 0 && img < 0; --i) {
         const Stroke &st = sheet.strokes[i];
-        if (st.boxed() && !st.locked && QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().contains(w)) img = i;
+        if (st.boxed() && !st.locked && bounds(st).contains(w)) img = i;
     }
     if (!sel.isEmpty() && sel != QSet<int>{img} && selBounds().contains(w))   // a selected object alone stays one
         return {{QChar(0xE8C6), "Cut", [this] { copySelection(); deleteSelection(); }},
@@ -939,7 +939,7 @@ QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
                  trimIdx = -1;
                  cropIdx = img;
                  const Stroke &st = sheet.strokes[img];
-                 cropRect = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+                 cropRect = bounds(st);
                  update();
              }},
             {QChar(0xE8C6), "Trim picture", [this, img] {

@@ -229,7 +229,7 @@ int main(int argc, char **argv) {
     QGuiApplication::clipboard()->setImage(shotImg);
     c.paste();
     CHECK(s.strokes.size() == 1 && !s.strokes[0].img.isEmpty() && QFile::exists(imageDir + "/" + s.strokes[0].img + ".png"));
-    auto box = [&] { return QRectF(s.strokes[0].pts[0].pos(), s.strokes[0].pts[1].pos()); };
+    auto box = [&] { return bounds(s.strokes[0]); };
     CHECK(qAbs(box().width() - 50.8) < 0.01 && qAbs(box().center().x() - 459 / 3.0) < 0.01);   // view centre (499-40)/3
     QPointF br = box().bottomRight();
     drag(br, br + QPointF(50.8, 25.4));                // pen tool on the handle: resize to twice the size
@@ -306,7 +306,7 @@ int main(int argc, char **argv) {
     QString edited;
     c.onEditMath = [&](const QString &m) { edited = m; };
     c.insertMath("plot -10 10 -7.5 7.5\ny = x");
-    QRectF mb(s.strokes.last().pts[0].pos(), s.strokes.last().pts[1].pos());
+    QRectF mb = bounds(s.strokes.last());
     CHECK(s.strokes.size() == 2 && qAbs(mb.width() - 80) < 0.01 && qAbs(mb.height() - 60) < 0.01);
     menuPick(mb.center(), "Edit math");
     CHECK(edited == "plot -10 10 -7.5 7.5\ny = x");
@@ -314,7 +314,7 @@ int main(int argc, char **argv) {
     c.undo();
     CHECK(s.strokes[1].math.endsWith("= x") && !c.updateMath("eq\n1"));
     c.insertMath("eq\ny = x^2");   // equations: 6 mm text, sized to their content
-    mb = QRectF(s.strokes.last().pts[0].pos(), s.strokes.last().pts[1].pos());
+    mb = bounds(s.strokes.last());
     CHECK(s.strokes.size() == 3 && mb.width() > mb.height() && mb.height() > 4 && mb.height() < 12);
     c.undo();
     c.undo();

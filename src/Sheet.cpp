@@ -86,7 +86,7 @@ void drawSegment(QPainter &p, const Stroke &s, int i) {
 
 void drawStroke(QPainter &p, const Stroke &s) {
     if (!s.img.isEmpty()) {
-        QRectF r(s.pts[0].pos(), s.pts[1].pos());
+        QRectF r = bounds(s);
         QImage img = imageOf(s.img);
         p.save();
         p.setRenderHint(QPainter::SmoothPixmapTransform);
@@ -96,7 +96,7 @@ void drawStroke(QPainter &p, const Stroke &s) {
     } else if (!s.math.isEmpty()) {
         p.save();
         p.setPen(s.color);
-        drawMath(p, s.math, QRectF(s.pts[0].pos(), s.pts[1].pos()).normalized());
+        drawMath(p, s.math, bounds(s));
         p.restore();
     } else if (s.color.alpha() < 255) {   // highlighter: one path, so overlapping segments don't darken
         QPolygonF poly;
@@ -163,7 +163,7 @@ bool loadSheet(Sheet &s, const QString &path) {
 QSet<QPoint> inkCells(const Sheet &s, const Stroke &st, bool below) {
     QSet<QPoint> out;
     if (st.boxed()) {   // image/math: every cell its rectangle covers (edges touching a cell don't count)
-        QRectF r = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().adjusted(0.01, 0.01, -0.01, -0.01);
+        QRectF r = bounds(st).adjusted(0.01, 0.01, -0.01, -0.01);
         QPoint a = s.cellAt(r.topLeft()), b = s.cellAt(r.bottomRight());
         for (int y = a.y(); y <= b.y(); ++y)
             for (int x = a.x(); x <= b.x(); ++x) out.insert({x, y});

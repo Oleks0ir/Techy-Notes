@@ -164,15 +164,6 @@ int main(int argc, char **argv) {
             symbolsRight += got.size() == 3;
             QList<QList<int>> al = alignSymbols(in, word.split("", Qt::SkipEmptyParts), {});   // calibration knows the word
             aligned += al == truth;
-            if (al != truth && qEnvironmentVariableIsSet("SEGDEBUG")) {
-                auto str = [](const QList<QList<int>> &g) { QString s; for (const auto &l : g) { s += "["; for (int i : l) s += QString::number(i) + " "; s += "]"; } return s; };
-                std::printf("  align %s: %s, want %s\n", qPrintable(word), qPrintable(str(al)), qPrintable(str(truth)));
-            }
-            if (got.size() != 3 && qEnvironmentVariableIsSet("SEGDEBUG")) {
-                QString g;
-                for (const InkSymbol &s : got) g += "[" + s.cands[0] + ":" + QString::number(s.strokes.size()) + "]";
-                std::printf("  %s (%d strokes) -> %s\n", qPrintable(word), int(in.size()), qPrintable(g));
-            }
         }
         std::printf("segmentation: %d/300 words read right, %d/300 split into 3 symbols, calibration: %d/300 aligned\n",
                     right, symbolsRight, aligned);

@@ -15,10 +15,13 @@
 struct Mlp {
     int d = 0, h = 0;
     QStringList classes;
-    std::vector<float> w1, b1, w2, b2;   // w1: h x d, w2: classes x h, row-major
+    QList<float> w1, b1, w2, b2;   // w1: h x d, w2: classes x h, row-major
 };
 std::vector<float> inkFeatures(const QList<QPolygonF> &strokes);   // any units; Mlp::d values
-std::vector<float> mlpProbs(const Mlp &m, const std::vector<float> &features);
+QList<QPolygonF> inkOf(const QList<QPolygonF> &ink, const QList<int> &strokes);   // those strokes of ink
+std::vector<float> hiddenOf(const Mlp &m, const std::vector<float> &features);   // the ReLU layer
+std::vector<float> outputOf(const Mlp &m, const std::vector<float> &hidden);     // softmax over the classes
+std::vector<float> mlpProbs(const Mlp &m, const std::vector<float> &features);   // outputOf(hiddenOf(...))
 Mlp loadMlp(const QString &path);   // d == 0: missing or unreadable
 bool saveMlp(const Mlp &m, const QString &path);
 
