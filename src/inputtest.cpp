@@ -265,6 +265,52 @@ int main(int argc, char **argv) {
     c.save();
     Sheet img;
     CHECK(loadSheet(img, f3) && img.strokes[0].img == s.strokes[0].img && img.strokes[1].color == s.strokes[1].color);
+
+    // picture menu (right-click on it): Move selects it, Trim crops it to the next drag, Delete removes it
+    auto menuPick = [&](QPointF mm, const QString &item) {
+        QTimer::singleShot(100, [=] {
+            if (auto m = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+                for (QAction *a : m->actions())
+                    if (a->text() == item) a->trigger();
+                m->close();
+            }
+        });
+        QMouseEvent e(QEvent::MouseButtonPress, scr(mm), c.mapToGlobal(scr(mm)), Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(&c, &e);   // returns once the menu closed
+        QEventLoop loop;
+        QTimer::singleShot(600, &loop, &QEventLoop::quit);   // menu cooldown
+        loop.exec();
+    };
+    c.tool = Canvas::Pen;
+    QRectF pic = box();
+    menuPick(pic.center(), "Move / resize picture");
+    drag(pic.center(), pic.center() + QPointF(20, 0));   // the pen moves it, draws nothing
+    CHECK(s.strokes.size() == 2 && QLineF(box().topLeft(), pic.topLeft() + QPointF(20, 0)).length() < 0.01);
+    pic = box();
+    QString oldId = s.strokes[0].img;
+    menuPick(pic.center(), "Trim picture");
+    drag(pic.topLeft() - QPointF(5, 5), pic.center());   // top-left quarter; the part outside the picture is ignored
+    QSize px = imageOf(s.strokes[0].img).size();
+    CHECK(s.strokes.size() == 2 && s.strokes[0].img != oldId && QLineF(box().topLeft(), pic.topLeft()).length() < 0.01 &&
+          qAbs(box().width() - pic.width() / 2) < 0.01 && px.width() >= 96 && px.width() <= 97 && px.height() >= 48 && px.height() <= 49);
+    c.undo();
+    CHECK(s.strokes[0].img == oldId);
+    // Crop: handles size the frame, inside moves it (nothing changes yet), a tap outside applies
+    pic = box();
+    menuPick(pic.center(), "Crop picture");
+    drag(pic.bottomRight(), pic.bottomRight() - QPointF(pic.width() / 2, 0));   // keep the left half
+    drag(pic.topLeft(), pic.topLeft() + QPointF(0, pic.height() / 2));          // ... and its bottom half
+    QPointF mid(pic.left() + pic.width() / 4, pic.top() + pic.height() * 3 / 4);
+    drag(mid, mid + QPointF(10, -10));                                          // move the frame
+    CHECK(s.strokes[0].img == oldId && s.strokes.size() == 2);
+    click(pic.bottomRight() + QPointF(30, 30));
+    QRectF want(pic.left() + 10, pic.center().y() - 10, pic.width() / 2, pic.height() / 2);
+    CHECK(s.strokes[0].img != oldId && s.strokes.size() == 2 && QLineF(box().topLeft(), want.topLeft()).length() < 0.01 &&
+          QLineF(box().bottomRight(), want.bottomRight()).length() < 0.01);
+    c.undo();
+    CHECK(s.strokes[0].img == oldId);
+    menuPick(box().center(), "Delete picture");
+    CHECK(s.strokes.size() == 1 && s.strokes[0].img.isEmpty());
     std::puts("inputtest ok");
     return 0;
 }

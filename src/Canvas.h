@@ -8,7 +8,7 @@
 
 class Canvas : public QWidget {
 public:
-    enum Tool { Pen, Highlighter, Line, Lasso, Rect, Snip, Eraser, None } tool = Pen;   // Snip: copies a rectangle as an image
+    enum Tool { Pen, Highlighter, Line, Lasso, Rect, Snip, Eraser, Trim, Crop, None } tool = Pen;   // Snip: copies a rectangle as an image; Trim, Crop: picture menu only
     Sheet sheet;
     QString path;                // open sheet file; empty: none, canvas disabled
     QColor color = Qt::black;
@@ -53,6 +53,7 @@ private:
     void begin(QPointF screen, float pressure, qint64 t, Tool t0);
     void move(QPointF screen, float pressure, qint64 t);
     void end();
+    bool cropPicture(int i, QRectF r);   // r world mm, clipped to the picture; false: unchanged
     void cancel();               // drops the gesture in progress without an undo step
     void erase(QPointF world);
     void addImage(const QImage &img, QPointF center);   // world mm; shrunk to fit a page, selected
@@ -84,6 +85,10 @@ private:
     QPolygonF lasso;           // select gesture outline (Rect: first + last point), world mm
     bool moving = false;       // select gesture moves or resizes the selection
     bool resizing = false;     // ... by its corner handle
+    int trimIdx = -1;          // picture to crop with the next drag (picture menu > Trim)
+    int cropIdx = -1;          // picture with a crop frame (picture menu > Crop)
+    QRectF cropRect, cropFrom; // the frame, world mm; and at the start of a drag
+    int cropGrab = 0;          // drag: 1 top-left handle, 2 bottom-right handle, 3 moves the frame
     bool adding = false;       // select gesture adds to the selection (Shift/Ctrl held)
     QPointF dragFrom;          // world mm
     QTransform selXf;          // selection move/resize in progress, world mm

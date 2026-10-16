@@ -7,6 +7,7 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
+#include <QPainterPath>
 #include <QTouchEvent>
 #include <QtMath>
 #include <algorithm>
@@ -39,6 +40,7 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
 }
 
 void Canvas::modified() {
+    trimIdx = cropIdx = -1;   // any edit (undo too) may shift the indices
     refresh(sheet, autoPages);
     dirty = true;
     autosave.start();
@@ -61,6 +63,7 @@ bool Canvas::open(const QString &file) {
     undoStack.clear();
     redoStack.clear();
     sel.clear();
+    trimIdx = cropIdx = -1;
     cacheDirty = true;
     setEnabled(ok);
     update();
@@ -217,18 +220,38 @@ void Canvas::paintEvent(QPaintEvent *) {
         p.setBrush(Qt::NoBrush);
         p.drawRect(selXf.mapRect(selBounds()));
     }
-    if ((active == Lasso || active == Rect || active == Snip) && !moving && !lasso.isEmpty()) {
+    if (trimIdx >= 0) {   // armed: the picture to trim
+        const Stroke &st = sheet.strokes[trimIdx];
+        p.setPen(QPen(QColor(0x1565c0), 3 / scale));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(QRectF(st.pts[0].pos(), st.pts[1].pos()));
+    }
+    if (cropIdx >= 0) {   // crop frame; the part cut away is dimmed
+        const Stroke &st = sheet.strokes[cropIdx];
+        QPainterPath away, keep;
+        away.addRect(QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized());
+        keep.addRect(cropRect);
+        p.fillPath(away.subtracted(keep), QColor(0, 0, 0, 110));
+        p.setPen(QPen(QColor(0x1565c0), 3 / scale));
+        p.setBrush(Qt::NoBrush);
+        p.drawRect(cropRect);
+    }
+    if ((active == Lasso || active == Rect || active == Snip || active == Trim) && !moving && !lasso.isEmpty()) {
         p.setPen(QPen(Qt::darkGray, 0, Qt::DashLine));
         p.setBrush(Qt::NoBrush);
         if (active == Lasso) p.drawPolyline(lasso);
         else p.drawRect(QRectF(lasso.first(), lasso.last()).normalized());
     }
     p.resetTransform();
-    if (!sel.isEmpty()) {   // resize handle, fixed screen size
-        QPointF h = selXf.map(selBounds().bottomRight()) * scale + offset;
+    auto handle = [&](QPointF world) {   // fixed screen size
         p.setPen(QPen(QColor(0x1565c0), 2));
         p.setBrush(Qt::white);
-        p.drawRect(QRectF(h - QPointF(7, 7), QSizeF(14, 14)));
+        p.drawRect(QRectF(world * scale + offset - QPointF(7, 7), QSizeF(14, 14)));
+    };
+    if (!sel.isEmpty()) handle(selXf.map(selBounds().bottomRight()));   // resize
+    if (cropIdx >= 0) {
+        handle(cropRect.topLeft());
+        handle(cropRect.bottomRight());
     }
     if (holdFired) {   // finger long-press armed: lift for the page menu
         p.setPen(QPen(QColor(0x1565c0), 3));
@@ -263,13 +286,27 @@ void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     bool onHandle = !sel.isEmpty() && QLineF(s, selBounds().bottomRight() * scale + offset).length() < 20;
     bool grab = onHandle || (!sel.isEmpty() && selBounds().contains(w));
     if (grab && (tl == Pen || tl == Highlighter || tl == Line)) tl = Lasso;   // drawing tools move/resize a selection too
+    if (trimIdx >= 0) tl = Trim;   // picture menu > Trim: the next drag, whatever the tool
+    if (cropIdx >= 0) tl = Crop;   // picture menu > Crop: every drag, until a tap outside the frame
     active = tl;
     plusOn = false;
     setFocus();   // Ctrl+Z now undoes ink, not a deletion in the notebook tree
     before = sheet.strokes;
     changed = false;
     Pt pt{float(w.x()), float(w.y()), pr, t};
-    if (tl == Snip) {
+    if (tl == Crop) {   // corner handles size the frame, inside moves it, outside applies the crop
+        auto near = [&](QPointF c) { return QLineF(s, c * scale + offset).length() < 20; };
+        cropGrab = near(cropRect.topLeft()) ? 1 : near(cropRect.bottomRight()) ? 2 : cropRect.contains(w) ? 3 : 0;
+        dragFrom = w;
+        cropFrom = cropRect;
+        if (!cropGrab) {
+            changed = cropPicture(cropIdx, cropRect);
+            cropIdx = -1;
+            update();
+        }
+        return;
+    }
+    if (tl == Snip || tl == Trim) {
         lasso = {w};
         return;
     }
@@ -317,7 +354,17 @@ void Canvas::move(QPointF s, float pr, qint64 t) {
         update();
     } else if (active == Eraser) {
         erase(w);
-    } else if (active == Lasso || active == Rect || active == Snip) {
+    } else if (active == Crop && cropGrab) {
+        QRectF r = cropFrom;
+        QPointF d = w - dragFrom;
+        const Stroke &st = sheet.strokes[cropIdx];
+        QRectF box = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+        if (cropGrab == 1) r.setTopLeft(QPointF(qMin(r.left() + d.x(), r.right() - 1), qMin(r.top() + d.y(), r.bottom() - 1)));
+        else if (cropGrab == 2) r.setBottomRight(QPointF(qMax(r.right() + d.x(), r.left() + 1), qMax(r.bottom() + d.y(), r.top() + 1)));
+        else r.moveTo(qBound(box.left(), r.left() + d.x(), box.right() - r.width()), qBound(box.top(), r.top() + d.y(), box.bottom() - r.height()));
+        cropRect = r & box;
+        update();
+    } else if (active == Lasso || active == Rect || active == Snip || active == Trim) {
         if (resizing) {   // uniform scale about the top-left corner, following the handle along the diagonal
             QPointF tl = selBounds().topLeft(), a = dragFrom - tl;
             double f = qMax(0.05, QPointF::dotProduct(w - tl, a) / qMax(QPointF::dotProduct(a, a), 1e-6));
@@ -341,6 +388,10 @@ void Canvas::end() {
     } else if (active == Snip) {
         QRectF r = QRectF(lasso.first(), lasso.last()).normalized();
         if (!r.isEmpty()) QGuiApplication::clipboard()->setImage(snapshot(sheet.strokes, r));
+        lasso.clear();
+    } else if (active == Trim) {   // crop the picture to the dragged rectangle; a tap or a miss leaves it
+        changed = cropPicture(trimIdx, QRectF(lasso.first(), lasso.last()).normalized());
+        trimIdx = -1;
         lasso.clear();
     } else if (active == Lasso || active == Rect) {
         if (moving && !selXf.isIdentity()) {
@@ -366,6 +417,21 @@ void Canvas::end() {
     active = None;
     update();
     if (changed) pushUndo(before);
+}
+
+bool Canvas::cropPicture(int i, QRectF r) {
+    Stroke &st = sheet.strokes[i];
+    QRectF box = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+    r &= box;
+    QImage img = imageOf(st.img);
+    if (r.isEmpty() || r == box || img.isNull()) return false;
+    double sx = img.width() / box.width(), sy = img.height() / box.height();
+    QRect px = QRectF((r.left() - box.left()) * sx, (r.top() - box.top()) * sy, r.width() * sx, r.height() * sy).toAlignedRect();
+    QString id = storeImage(img.copy(px & img.rect()));
+    if (id.isEmpty()) return false;
+    st = {{{float(r.left()), float(r.top()), 1, 0}, {float(r.right()), float(r.bottom()), 1, 0}}, st.color, 0, id};
+    cacheDirty = true;
+    return true;
 }
 
 void Canvas::cancel() {
@@ -614,13 +680,43 @@ void Canvas::clearPage(QPoint c) {
 }
 
 void Canvas::pageMenu(QPointF s) {
-    QPoint c = sheet.cellAt(toWorld(s));
-    if (menuOpen || (sinceMenu.isValid() && sinceMenu.elapsed() < 500) || !sheet.pages.contains(c)) return;
+    QPointF w = toWorld(s);
+    QPoint c = sheet.cellAt(w);
+    int img = -1;   // topmost unlocked image under the point
+    for (int i = sheet.strokes.size() - 1; i >= 0 && img < 0; --i) {
+        const Stroke &st = sheet.strokes[i];
+        if (!st.img.isEmpty() && !st.locked && QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().contains(w)) img = i;
+    }
+    if (menuOpen || (sinceMenu.isValid() && sinceMenu.elapsed() < 500) || (img < 0 && !sheet.pages.contains(c))) return;
     menuOpen = true;
     plusOn = false;
     QMenu m;
-    m.addAction("Clear page", [&] { clearPage(c); })->setEnabled(sheet.exportQueue.contains(c));   // queue = pages with ink
-    m.addAction("Delete page", [&] { deletePage(c); })->setEnabled(canDeletePage(sheet, c));
+    if (img >= 0) {   // selected, it moves and resizes with any tool
+        m.addAction("Move / resize picture", [&] { select({img}); });
+        m.addAction("Trim picture", [&] {
+            select({});
+            cropIdx = -1;
+            trimIdx = img;
+            update();
+        });
+        m.addAction("Crop picture", [&] {
+            select({});
+            trimIdx = -1;
+            cropIdx = img;
+            const Stroke &st = sheet.strokes[img];
+            cropRect = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+            update();
+        });
+        m.addAction("Delete picture", [&] {
+            select({img});
+            deleteSelection();
+        });
+        m.addSeparator();
+    }
+    if (sheet.pages.contains(c)) {
+        m.addAction("Clear page", [&] { clearPage(c); })->setEnabled(sheet.exportQueue.contains(c));   // queue = pages with ink
+        m.addAction("Delete page", [&] { deletePage(c); })->setEnabled(canDeletePage(sheet, c));
+    }
     m.exec(mapToGlobal(s.toPoint()));
     menuOpen = false;
     sinceMenu.start();
