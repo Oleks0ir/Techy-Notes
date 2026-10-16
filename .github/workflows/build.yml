@@ -20,7 +20,7 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: zip mingw-w64-x86_64-qt6-basemingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc
+          install: zip mingw-w64-x86_64-qt6-base mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
       - run: ./build/selftest.exe && timeout 120 ./build/inputtest.exe -platform offscreen
       - name: Package
