@@ -12,6 +12,29 @@
 #include <QtMath>
 #include <algorithm>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <QAbstractNativeEventFilter>
+#include <windows.h>
+// Qt reports the pen's side button only while the tip touches; Windows has it while hovering too (WM_POINTER).
+// Windows keeps it set after the button is let go, until the next tap.
+// ponytail: Windows only; Android/iOS need their own hover-button source (or another ring trigger)
+struct BarrelFilter : QAbstractNativeEventFilter {
+    bool nativeEventFilter(const QByteArray &, void *message, qintptr *) override {
+        auto *m = static_cast<MSG *>(message);
+        if (m->message != WM_POINTERUPDATE && m->message != WM_POINTERDOWN && m->message != WM_POINTERUP) return false;
+        POINTER_INPUT_TYPE t;
+        POINTER_PEN_INFO pi;
+        UINT32 id = GET_POINTERID_WPARAM(m->wParam);
+        if (GetPointerType(id, &t) && t == PT_PEN && GetPointerPenInfo(id, &pi)) Canvas::penBarrel = pi.penFlags & PEN_FLAG_BARREL;
+        return false;   // Qt handles it as usual
+    }
+};
+#endif
+
 static const QColor kBackground(0x5a, 0x5a, 0x5a);
 static constexpr float kHighlightWidth = 5;    // mm. Calibration knob, like the alpha below
 static constexpr int kHighlightAlpha = 100;
@@ -22,6 +45,10 @@ Canvas::Canvas(QWidget *parent) : QWidget(parent) {
     setMouseTracking(true);    // mouse hover: "+" buttons
     setFocusPolicy(Qt::ClickFocus);
     setAcceptDrops(true);      // image files and images
+#ifdef Q_OS_WIN
+    static BarrelFilter barrel;
+    qApp->installNativeEventFilter(&barrel);   // installing twice is harmless
+#endif
     settle.setSingleShot(true);
     settle.setInterval(150);   // re-render this long after the last pan/zoom step
     connect(&settle, &QTimer::timeout, this, qOverload<>(&QWidget::update));
@@ -266,6 +293,54 @@ void Canvas::paintEvent(QPaintEvent *) {
         p.drawLine(c - QPointF(6, 0), c + QPointF(6, 0));
         p.drawLine(c - QPointF(0, 6), c + QPointF(0, 6));
     }
+    if (ringOpen) paintRing(p);
+}
+
+void Canvas::paintRing(QPainter &p) {
+    QFont iconFont("Segoe Fluent Icons");   // Windows 11; Windows 10 has the same codepoints in Segoe MDL2 Assets
+    if (!QFontMetrics(iconFont).inFont(QChar(0xE76D))) iconFont = QFont("Segoe MDL2 Assets");
+    iconFont.setPixelSize(22);
+    QFont small = font();
+    small.setPixelSize(11);
+    QPainterPath lit;
+    for (int i = 0; i < ring.size(); ++i) {
+        auto [a, span] = ringArc(i);
+        bool inner = i < ringInner, hot = i == ringHot;
+        double ri = kRing[inner ? 0 : 1], ro = kRing[inner ? 1 : 2];
+        QRectF outer(ringAt - QPointF(ro, ro), QSizeF(2 * ro, 2 * ro)), in(ringAt - QPointF(ri, ri), QSizeF(2 * ri, 2 * ri));
+        QPainterPath seg;
+        seg.arcMoveTo(outer, a);
+        seg.arcTo(outer, a, span);
+        seg.arcTo(in, a + span, -span);
+        seg.closeSubpath();
+        const MenuItem &it = ring[i];
+        bool swatch = it.color.isValid();
+        if (hot) lit = seg;
+        p.setPen(QPen(QColor(0x90, 0x90, 0x90), 1));
+        p.setBrush(swatch ? it.color : hot ? QColor(0x1565c0) : QColor(250, 250, 250, 235));
+        p.drawPath(seg);
+        if (swatch) continue;   // lit: thick outline, drawn last
+        double mid = qDegreesToRadians(a + span / 2), rm = (ri + ro) / 2;
+        QPointF c = ringAt + QPointF(qCos(mid), -qSin(mid)) * rm;
+        p.setPen(hot ? Qt::white : Qt::black);
+        bool glyph = !it.icon.isNull() && QFontMetrics(iconFont).inFont(it.icon);
+        p.setFont(glyph ? iconFont : small);   // icon only; the lit item's name shows in the centre
+        p.drawText(QRectF(c - QPointF(40, 15), QSizeF(80, 30)), Qt::AlignCenter, glyph ? QString(it.icon) : it.label);
+    }
+    if (ringHot >= ringInner) {
+        p.setPen(QPen(QColor(0x1565c0), 5));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(lit);
+    }
+    if (ringHot >= 0 && ringHot < ringInner) {
+        QRectF r(ringAt + QPointF(-kRing[0], 10), QSizeF(2 * kRing[0], 18));
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 0, 170));   // readable on white pages and the grey desk
+        p.drawRoundedRect(r, 4, 4);
+        p.setFont(small);
+        p.setPen(Qt::white);
+        p.drawText(r, Qt::AlignCenter, ring[ringHot].label);
+    }
 }
 
 void Canvas::select(const QSet<int> &s) {
@@ -295,8 +370,8 @@ void Canvas::begin(QPointF s, float pr, qint64 t, Tool tl) {
     changed = false;
     Pt pt{float(w.x()), float(w.y()), pr, t};
     if (tl == Crop) {   // corner handles size the frame, inside moves it, outside applies the crop
-        auto near = [&](QPointF c) { return QLineF(s, c * scale + offset).length() < 20; };
-        cropGrab = near(cropRect.topLeft()) ? 1 : near(cropRect.bottomRight()) ? 2 : cropRect.contains(w) ? 3 : 0;
+        auto atHandle = [&](QPointF c) { return QLineF(s, c * scale + offset).length() < 20; };
+        cropGrab = atHandle(cropRect.topLeft()) ? 1 : atHandle(cropRect.bottomRight()) ? 2 : cropRect.contains(w) ? 3 : 0;
         dragFrom = w;
         cropFrom = cropRect;
         if (!cropGrab) {
@@ -489,11 +564,12 @@ void Canvas::deleteSelection() {
     select({});
 }
 
-void Canvas::paste() {
+void Canvas::paste(QPointF at) {
+    if (at.isNull()) at = rect().center();
     const QMimeData *md = QGuiApplication::clipboard()->mimeData();
     if (!md || active != None) return;
     if (!md->hasFormat(kStrokesMime) && md->hasImage())   // a screenshot
-        return addImage(qvariant_cast<QImage>(md->imageData()), toWorld(rect().center()));
+        return addImage(qvariant_cast<QImage>(md->imageData()), toWorld(at));
     QDataStream d(md->data(kStrokesMime));
     qint32 version = 0;
     QList<Stroke> in;
@@ -501,7 +577,7 @@ void Canvas::paste() {
     if (d.status() != QDataStream::Ok || version != 2 || in.isEmpty()) return;
     QRectF b;
     for (const Stroke &s : in) b |= bounds(s);
-    QPointF by = toWorld(rect().center()) - b.center();   // paste centered in view
+    QPointF by = toWorld(at) - b.center();
     QList<Stroke> prev = sheet.strokes;
     QSet<int> added;
     for (Stroke &s : in) {
@@ -605,13 +681,91 @@ void Canvas::mouseReleaseEvent(QMouseEvent *e) {
     if (!fromTouch(e) && e->button() == Qt::LeftButton && active != None) end();
 }
 
+void Canvas::openRing(QPointF s) {
+    QPointF w = toWorld(s);
+    ring = objectActions(w);
+    bool colors = ring.isEmpty() || !sel.isEmpty();   // tools ring and selection ring get the colour band
+    if (ring.isEmpty()) {
+        const char *names[] = {"Pen", "Highlighter", "Line", "Lasso", "Rect", "Snip", "Eraser"};   // Tool order
+        const ushort icons[] = {0xE76D, 0xE7E6, 0xE738, 0, 0xE739, 0xE7A8, 0xE75C};          // 0: no glyph, label
+        for (int t = 0; t < 7; ++t) ring << MenuItem{QChar(icons[t]), names[t], [this, t] { tool = Tool(t); }};
+        ring << MenuItem{QChar(0xE77F), "Paste", [this, s] { paste(s); }}
+             << MenuItem{QChar(0xE7A7), "Undo", [this] { undo(); }} << MenuItem{QChar(0xE7A6), "Redo", [this] { redo(); }};
+    }
+    ringInner = ring.size();
+    if (colors)
+        for (const char *hex : {"#000000", "#1565c0", "#c62828", "#2e7d32", "#fdd835"})   // the toolbar presets
+            ring << MenuItem{QChar(), hex, [this, c = QColor(hex)] { setColor(c); }, QColor(hex)};
+    ringAt = s;
+    ringHot = -1;
+    ringOpen = true;
+    plusOn = false;
+    update();
+}
+
+// Arc of ring item i: start angle and span, degrees counter-clockwise from 3 o'clock.
+// Right-handed: 7:30 over 10:30 to 1:30, away from the hand; left-handed mirrored.
+std::pair<double, double> Canvas::ringArc(int i) const {
+    bool inner = i < ringInner;
+    int n = inner ? ringInner : ring.size() - ringInner;
+    double span = 180.0 / n, a = 45 + (inner ? i : i - ringInner) * span;
+    return {leftHanded ? 180 - a - span : a, span};
+}
+
+int Canvas::ringItemAt(QPointF s) const {
+    QPointF v = s - ringAt;
+    double r = QLineF(s, ringAt).length(), ang = qRadiansToDegrees(qAtan2(-v.y(), v.x()));
+    if (r < kRing[0] || r >= (ringInner < ring.size() ? kRing[2] : kRing[1])) return -1;
+    for (int i = 0; i < ring.size(); ++i) {
+        auto [a, span] = ringArc(i);
+        if ((i < ringInner) == (r < kRing[1]) && std::fmod(ang - a + 720, 360.0) < span) return i;
+    }
+    return -1;
+}
+
+// Radial menu (pen only): opens while hovering with the side button; hover lights an item, a tap picks it, a tap
+// elsewhere closes it. Windows reports the button only until that tap, so the tap is part of the gesture. The tap
+// never draws: the pen stays blocked until it is lifted. True: the event was the ring's.
+bool Canvas::ringEvent(QTabletEvent *e) {
+    if (ringOpen) {
+        e->accept();
+        if (e->type() == QEvent::TabletPress) {
+            int i = ringItemAt(e->position());
+            ringOpen = false;
+            penBlocked = needBarrelOff = true;
+            update();
+            if (i >= 0) ring[i].run();
+            if (onPick) onPick();
+        } else if (e->type() == QEvent::TabletMove && ringItemAt(e->position()) != ringHot) {
+            ringHot = ringItemAt(e->position());
+            update();
+        }
+        return true;
+    }
+    if (penBlocked) {
+        e->accept();
+        if (e->type() == QEvent::TabletRelease) penBlocked = false;
+        return true;
+    }
+    if (!penBarrel) needBarrelOff = false;
+    if (penBarrel && !needBarrelOff && e->type() == QEvent::TabletMove && !e->buttons() && active == None &&
+        !QApplication::activePopupWidget()) {
+        e->accept();
+        openRing(e->position());
+        return true;
+    }
+    return false;
+}
+
+
 void Canvas::tabletEvent(QTabletEvent *e) {
     lastPenMs = QDateTime::currentMSecsSinceEpoch();
+    if (ringEvent(e)) return;
     // Right-click button: one menu per hold, like the notebook tree; it cancels a stroke in progress.
     // Held-button events stay ours, else Qt turns them into mouse events that close the menu again.
     if (e->buttons() & menuButtons) {
         if (!menuHeld && (e->type() == QEvent::TabletPress || active != None)) {
-            menuHeld = true;
+            menuHeld = needBarrelOff = true;   // no ring from the button state Windows keeps after this
             cancel();
             pageMenu(e->position());
         }
@@ -679,40 +833,48 @@ void Canvas::clearPage(QPoint c) {
     update();
 }
 
-void Canvas::pageMenu(QPointF s) {
-    QPointF w = toWorld(s);
-    QPoint c = sheet.cellAt(w);
-    int img = -1;   // topmost unlocked image under the point
+// The object under w (world mm) and what can be done with it: general actions first, then its own.
+// Objects: the selection, then the topmost unlocked picture. Empty: plain canvas.
+// ponytail: two kinds as plain branches; an object type when equations/graphs add more
+QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
+    int img = -1;
     for (int i = sheet.strokes.size() - 1; i >= 0 && img < 0; --i) {
         const Stroke &st = sheet.strokes[i];
         if (!st.img.isEmpty() && !st.locked && QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().contains(w)) img = i;
     }
-    if (menuOpen || (sinceMenu.isValid() && sinceMenu.elapsed() < 500) || (img < 0 && !sheet.pages.contains(c))) return;
+    if (!sel.isEmpty() && sel != QSet<int>{img} && selBounds().contains(w))   // a selected picture alone stays a picture
+        return {{QChar(0xE8C6), "Cut", [this] { copySelection(); deleteSelection(); }},
+                {QChar(0xE8C8), "Copy", [this] { copySelection(); }},
+                {QChar(0xE74D), "Delete", [this] { deleteSelection(); }}};
+    if (img < 0) return {};
+    return {{QChar(0xE7C2), "Move / resize picture", [this, img] { select({img}); }},   // selected: any tool drags it
+            {QChar(0xE74D), "Delete picture", [this, img] { select({img}); deleteSelection(); }},
+            {QChar(0xE7A8), "Crop picture", [this, img] {
+                 select({});
+                 trimIdx = -1;
+                 cropIdx = img;
+                 const Stroke &st = sheet.strokes[img];
+                 cropRect = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
+                 update();
+             }},
+            {QChar(0xE8C6), "Trim picture", [this, img] {
+                 select({});
+                 cropIdx = -1;
+                 trimIdx = img;
+                 update();
+             }}};
+}
+
+void Canvas::pageMenu(QPointF s) {
+    QPointF w = toWorld(s);
+    QPoint c = sheet.cellAt(w);
+    QList<MenuItem> acts = objectActions(w);
+    if (menuOpen || (sinceMenu.isValid() && sinceMenu.elapsed() < 500) || (acts.isEmpty() && !sheet.pages.contains(c))) return;
     menuOpen = true;
     plusOn = false;
     QMenu m;
-    if (img >= 0) {   // selected, it moves and resizes with any tool
-        m.addAction("Move / resize picture", [&] { select({img}); });
-        m.addAction("Trim picture", [&] {
-            select({});
-            cropIdx = -1;
-            trimIdx = img;
-            update();
-        });
-        m.addAction("Crop picture", [&] {
-            select({});
-            trimIdx = -1;
-            cropIdx = img;
-            const Stroke &st = sheet.strokes[img];
-            cropRect = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized();
-            update();
-        });
-        m.addAction("Delete picture", [&] {
-            select({img});
-            deleteSelection();
-        });
-        m.addSeparator();
-    }
+    for (const MenuItem &a : acts) m.addAction(a.label, a.run);
+    if (!acts.isEmpty()) m.addSeparator();
     if (sheet.pages.contains(c)) {
         m.addAction("Clear page", [&] { clearPage(c); })->setEnabled(sheet.exportQueue.contains(c));   // queue = pages with ink
         m.addAction("Delete page", [&] { deletePage(c); })->setEnabled(canDeletePage(sheet, c));

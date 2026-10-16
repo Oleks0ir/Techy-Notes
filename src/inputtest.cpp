@@ -17,6 +17,7 @@
 #include <QTemporaryDir>
 #include <cassert>
 #include <cstdio>
+#include <QtMath>
 
 static Canvas *cv;
 static QPointF scr(QPointF mm) { return mm * 3 + QPointF(40, 40); }   // default view: scale 3, offset 40,40
@@ -311,6 +312,46 @@ int main(int argc, char **argv) {
     CHECK(s.strokes[0].img == oldId);
     menuPick(box().center(), "Delete picture");
     CHECK(s.strokes.size() == 1 && s.strokes[0].img.isEmpty());
+
+    // pen ring: side button while hovering (Windows' flag, faked here) opens it at the tip; a tap on an item picks it,
+    // a tap elsewhere closes it; that tap never draws. Windows reports the button until that tap.
+    auto penPx = [&](QEvent::Type t, QPointF px, Qt::MouseButtons b) {
+        QTabletEvent e(t, QPointingDevice::primaryPointingDevice(), px, c.mapToGlobal(px), 0.8, 0, 0, 0, 0, 0, Qt::NoModifier,
+                       t == QEvent::TabletMove ? Qt::NoButton : Qt::LeftButton, b);
+        QApplication::sendEvent(&c, &e);
+    };
+    auto onRing = [](QPointF at, double deg, double r) {
+        return at + QPointF(qCos(qDegreesToRadians(deg)), -qSin(qDegreesToRadians(deg))) * r;
+    };
+    auto openRingAt = [&](QPointF px) {
+        Canvas::penBarrel = true;   // side button pressed while hovering
+        penPx(QEvent::TabletMove, px, Qt::NoButton);
+    };
+    auto tapAt = [&](QPointF px) {
+        penPx(QEvent::TabletPress, px, Qt::LeftButton | (Canvas::penBarrel ? Qt::RightButton : Qt::NoButton));
+        Canvas::penBarrel = false;                                       // the tap ends it
+        penPx(QEvent::TabletMove, px + QPointF(30, 0), Qt::LeftButton);   // draws unless blocked
+        penPx(QEvent::TabletRelease, px + QPointF(30, 0), Qt::NoButton);
+        penPx(QEvent::TabletMove, px + QPointF(30, 0), Qt::NoButton);    // hovers again
+    };
+    QPointF at(500, 400);
+    qsizetype n = s.strokes.size();
+    openRingAt(at);
+    QPointF eraserItem = onRing(at, 45 + 6.5 * 18, 100);                 // 7th of 10 tool items, 18° each
+    penPx(QEvent::TabletMove, eraserItem, Qt::NoButton);
+    tapAt(eraserItem);
+    CHECK(c.tool == Canvas::Eraser && s.strokes.size() == n);
+    c.tool = Canvas::Pen;
+    penPx(QEvent::TabletMove, at, Qt::NoButton);
+    tapAt(at);                                                           // ring closed: an ordinary stroke
+    CHECK(s.strokes.size() == n + 1);
+    c.undo();
+    openRingAt(at);
+    tapAt(onRing(at, 45 + 2.5 * 36, 172));                               // third of 5 colours
+    CHECK(c.color == QColor("#c62828") && s.strokes.size() == n);
+    openRingAt(at);
+    tapAt(at);                                                           // the centre: closes, changes nothing
+    CHECK(c.color == QColor("#c62828") && c.tool == Canvas::Pen && s.strokes.size() == n);
     std::puts("inputtest ok");
     return 0;
 }

@@ -372,6 +372,13 @@ int main(int argc, char **argv) {
     autoPages->setCheckable(true);
     autoPages->setChecked(canvas->autoPages);
     autoPages->setToolTip("Ink outside the pages, near a page bottom or on the ghost page creates pages. Off: only \"+\" adds pages.");
+    canvas->leftHanded = st.value("pen/leftHanded", false).toBool();
+    auto lefty = settings->addAction("Left-handed (pen ring opens to the right)", [=](bool on) {
+        canvas->leftHanded = on;
+        QSettings().setValue("pen/leftHanded", on);
+    });
+    lefty->setCheckable(true);
+    lefty->setChecked(canvas->leftHanded);
     // Ctrl+Z restores the last notebook-tree deletion while the tree has focus (drawing takes the focus away)
     std::function<bool()> undoDelete = [] { return false; };
 
@@ -406,6 +413,11 @@ int main(int argc, char **argv) {
     }
 
     tb->addSeparator();
+    canvas->onPick = [=] {   // the pen ring changed the tool or colour: show it on the toolbar
+        tools->actions()[canvas->tool]->setChecked(true);
+        for (QAction *a : colors->actions())
+            if (a->text() == canvas->color.name()) a->setChecked(true);
+    };
     auto slider = new QSlider(Qt::Horizontal);   // tenths of a mm
     slider->setRange(1, 100);
     slider->setMaximumWidth(140);

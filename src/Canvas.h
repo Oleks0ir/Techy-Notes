@@ -5,6 +5,7 @@
 #include <QTimer>
 #include <QTransform>
 #include <QWidget>
+#include <functional>
 
 class Canvas : public QWidget {
 public:
@@ -20,6 +21,9 @@ public:
     int eraserButtons = 0;                  // buttons that erase, besides the pen's own eraser mode
     int menuButtons = Qt::RightButton;      // right-click: opens menus, does nothing on the canvas yet
     float pressLow = 0, pressHigh = 1;
+    bool leftHanded = false;             // Settings: mirrors the pen ring
+    static inline bool penBarrel = false; // pen side button as Windows reports it, also while hovering
+    std::function<void()> onPick;        // after a ring pick: the toolbar shows the new tool/colour
 
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
@@ -27,7 +31,7 @@ public:
     void setColor(QColor c);     // also recolors the selection
     void copySelection();
     void deleteSelection();
-    void paste();
+    void paste(QPointF screen = {});   // at that point of the canvas; default: view centre
     bool open(const QString &file);   // saves the current sheet first; false: kept current sheet or load failed
     void save();                 // writes pending changes now (autosave does it 1 s after the last change)
     bool autoPages = true;       // Settings: ink creates pages (outside pages, page below, ghost page)
@@ -60,7 +64,14 @@ private:
     void pushUndo(const QList<Stroke> &prev);
     void modified();             // after any sheet edit: pages/queue follow the ink, autosave
     void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
-    void pageMenu(QPointF screen);   // right-click on a page: clear / delete
+    struct MenuItem { QChar icon; QString label; std::function<void()> run; QColor color = {}; };   // color: a swatch
+    QList<MenuItem> objectActions(QPointF world);   // the selection / picture there: its actions; empty: none
+    void pageMenu(QPointF screen);   // right-click: object actions, then clear / delete page
+    void openRing(QPointF screen);
+    bool ringEvent(QTabletEvent *e);
+    std::pair<double, double> ringArc(int i) const;
+    int ringItemAt(QPointF screen) const;   // -1: none
+    void paintRing(QPainter &p);
     bool pressPlus(QPointF screen);
     QPoint focused() const { return sheet.cellAt(toWorld(rect().center())); }
     void select(const QSet<int> &s);
@@ -107,6 +118,13 @@ private:
     QPointF holdAt;
     bool holdFired = false;    // held long enough: the lift opens the menu
     bool menuHeld = false;     // pen right-click button still held since its menu opened
+    static constexpr double kRing[3] = {55, 150, 195};   // px: dead zone, inner band (actions), outer band (colours)
+    QList<MenuItem> ring;      // pen ring: actions (ringInner of them), then colour swatches
+    int ringInner = 0, ringHot = -1;
+    QPointF ringAt;
+    bool ringOpen = false;
+    bool penBlocked = false;   // the tap that closed the ring: no ink until the pen lifts
+    bool needBarrelOff = false; // the button state Windows still reports was used; wait until it clears
     QTimer autosave;
     bool dirty = false;        // changes not yet on disk
     QTimer settle;             // running while a pan/zoom gesture is in progress
