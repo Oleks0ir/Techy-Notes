@@ -3,6 +3,8 @@
 #include "Math.h"
 #include "Sheet.h"
 #include <QElapsedTimer>
+#include <QHash>
+#include <random>
 #include <QFile>
 #include <QGuiApplication>
 #include <QPainter>
@@ -72,7 +74,7 @@ int main(int argc, char **argv) {
     };
     assert(curveAt(150, 50) && !curveAt(150, 150));
 
-    // ink recognition: seed templates placed like handwriting (grouping and layout; their matches are exact)
+    // ink recognition with the built-in classifier: HWRT samples placed like handwriting (grouping and layout)
     QList<Template> seed = loadTemplates(":/symbols.tpl");
     assert(seed.size() > 1000);
     auto write = [&](QList<QPolygonF> &ink, const QString &sym, double x, double y, double size) {
@@ -83,7 +85,7 @@ int main(int argc, char **argv) {
             ink << st;
         }
     };
-    auto read = [&](const QList<QPolygonF> &ink) { return inkLayout(recognizeSymbols(ink, seed)).text; };
+    auto read = [&](const QList<QPolygonF> &ink) { return inkLayout(recognizeSymbols(ink, {})).text; };
     QElapsedTimer took;
     took.start();
     QList<QPolygonF> ink;
@@ -103,23 +105,122 @@ int main(int argc, char **argv) {
     assert(integral.k == 'I' && integral.s == "x" && integral.a[1].a[0].s == "0");   // limits come in parentheses
     ink = {};
     write(ink, "1", 0, 0, 6), write(ink, "2", 0, 20, 6);
-    assert(read(ink) == "1\n2" && inkLayout(recognizeSymbols(ink, seed)).lines.size() == 2);
+    assert(read(ink) == "1\n2" && inkLayout(recognizeSymbols(ink, {})).lines.size() == 2);
+    {   // regression: every built-in x alone is "x", and "y=1" with each built-in y (not y^(=1), x^...)
+        int xs = 0, ys = 0, nx = 0, ny = 0;
+        for (const Template &t : seed) {
+            if (t.sym != "x" && t.sym != "y") continue;
+            QList<QPolygonF> in;
+            for (QPolygonF st : t.strokes) { for (QPointF &p : st) p = p * 8 + QPointF(0, 10); in << st; }
+            if (t.sym == "x") {
+                QString r = read(in);
+                ++nx, xs += r == "x";
+                if (r != "x") std::printf("  x -> %s (%d strokes)\n", qPrintable(r), int(t.strokes.size()));
+            } else {
+                QRectF yb = QRectF();
+                for (const QPolygonF &st : in) yb |= st.boundingRect();
+                // y's baseline at 60% of its height (the tail below): "=" at mid x-height, "1" standing on the baseline
+                double baseline = yb.top() + 0.6 * yb.height();
+                write(in, "=", yb.right() + 2, yb.top() + 0.1 * yb.height(), 5);
+                write(in, "1", yb.right() + 9, baseline - 0.9 * yb.height(), 0.9 * yb.height());
+                QString r = read(in);
+                ++ny, ys += r == "y=1";
+                if (r != "y=1") std::printf("  y=1 -> %s\n", qPrintable(r));
+            }
+        }
+        std::printf("x: %d/%d, y=1: %d/%d\n", xs, nx, ys, ny);
+        assert(xs >= 15 && ys >= 18);   // a few HWRT samples are odd (6 strokes, a single-stroke x)
+    }
+    {   // segmentation: 300 random 3-letter rows of built-in samples written close together (0.2 heights apart)
+        std::mt19937 rng(5);
+        QHash<QString, QList<const Template *>> of;
+        for (const Template &t : seed)
+            if (t.sym.size() == 1 && t.sym[0] >= 'a' && t.sym[0] <= 'z') of[t.sym] << &t;
+        QStringList letters = of.keys();
+        letters.sort();   // QHash order changes per run
+        int right = 0, symbolsRight = 0, aligned = 0;
+        for (int n = 0; n < 300; ++n) {
+            QList<QPolygonF> in;
+            QString word;
+            QList<QList<int>> truth;   // each letter's strokes
+            double x = 0;
+            for (int k = 0; k < 3; ++k) {
+                QString c = letters[rng() % letters.size()];
+                const Template *t = of[c][rng() % of[c].size()];
+                QRectF b;
+                for (const QPolygonF &st : t->strokes) b |= st.boundingRect();
+                double sc = 8 / std::max(b.height(), 0.3);   // 8 mm high (a wide flat letter: at most 3x)
+                truth.append(QList<int>{});
+                for (QPolygonF st : t->strokes) {
+                    for (QPointF &p : st) p = (p - b.topLeft()) * sc + QPointF(x, 0);
+                    truth.last() << int(in.size());
+                    in << st;
+                }
+                x += b.width() * sc + 1.6;
+                word += c;
+            }
+            QList<InkSymbol> got = recognizeSymbols(in, {});
+            right += inkLayout(got).text == word;
+            symbolsRight += got.size() == 3;
+            QList<QList<int>> al = alignSymbols(in, word.split("", Qt::SkipEmptyParts), {});   // calibration knows the word
+            aligned += al == truth;
+            if (al != truth && qEnvironmentVariableIsSet("SEGDEBUG")) {
+                auto str = [](const QList<QList<int>> &g) { QString s; for (const auto &l : g) { s += "["; for (int i : l) s += QString::number(i) + " "; s += "]"; } return s; };
+                std::printf("  align %s: %s, want %s\n", qPrintable(word), qPrintable(str(al)), qPrintable(str(truth)));
+            }
+            if (got.size() != 3 && qEnvironmentVariableIsSet("SEGDEBUG")) {
+                QString g;
+                for (const InkSymbol &s : got) g += "[" + s.cands[0] + ":" + QString::number(s.strokes.size()) + "]";
+                std::printf("  %s (%d strokes) -> %s\n", qPrintable(word), int(in.size()), qPrintable(g));
+            }
+        }
+        std::printf("segmentation: %d/300 words read right, %d/300 split into 3 symbols, calibration: %d/300 aligned\n",
+                    right, symbolsRight, aligned);
+        assert(symbolsRight >= 285 && right >= 235 && aligned >= 285);
+    }
     // an i dotted at the end of the word, the dot a short dash: still one symbol with its stem
     ink = {QPolygonF{{0, 4}, {0.2, 10}}};
     write(ink, "n", 3, 4, 6);
     qsizetype dotAt = ink.size();
     ink << QPolygonF{{-0.3, 2}, {0.5, 2.1}};
-    QList<InkSymbol> word = recognizeSymbols(ink, seed);
+    QList<InkSymbol> word = recognizeSymbols(ink, {});
     assert(word.size() == 2 && word[0].strokes == QList<int>({0, int(dotAt)}));
     // calibration score: a sample of x is x for sure; expected as "o" it loses (below 0.5) and the guess says x
     QList<QPolygonF> xs;
     write(xs, "x", 0, 0, 10);
-    Guess gx = guessSymbol(xs, "x", seed), go = guessSymbol(xs, "o", seed);
+    Guess gx = guessSymbol(xs, "x", {}), go = guessSymbol(xs, "o", {});
+    std::printf("x: %s %.2f, as o: %s %.2f\n", qPrintable(gx.sym), gx.certainty, qPrintable(go.sym), go.certainty);
     assert(gx.sym == "x" && gx.certainty > 0.9 && go.sym == "x" && go.certainty < 0.5);
-    // calibration split: "=" (two overlapping lines) and an "i" (stem + dot) are one symbol each, the gap separates
-    QList<QPolygonF> cols{QPolygonF{{0, 0}, {10, 0}}, QPolygonF{{0, 5}, {10, 5}}, QPolygonF{{20, 2}, {20, 10}},
-                          QPolygonF{{20, -1}, {20.3, -0.7}}, QPolygonF{{30, 0}, {33, 10}}, QPolygonF{{32.7, 0}, {38, 10}}};
-    assert(splitColumns(cols) == QList<QList<int>>({{0, 1}, {2, 3}, {4}, {5}}));   // 4 and 5 touch: 2 symbols
+    // learning: a shape it has never seen (a spiral) is a new symbol after three personal samples, sure of it,
+    // and the built-in symbols are not forgotten
+    auto spiral = [](double k) {
+        QPolygonF s;
+        for (int i = 0; i < 40; ++i) s << QPointF(std::cos(i * 0.4), std::sin(i * 0.4)) * (i * 0.4 * k);
+        return QList<QPolygonF>{s};
+    };
+    QList<Template> mine;
+    for (double k : {1.0, 1.05, 0.95}) mine << makeTemplate("@", spiral(k));
+    Guess before = guessSymbol(spiral(1.02), "@", {}), after = guessSymbol(spiral(1.02), "@", mine);
+    std::printf("learned: %s %.2f\n", qPrintable(after.sym), after.certainty);
+    assert(before.certainty == 0 && after.sym == "@" && after.certainty > 0.9 && guessSymbol(xs, "x", mine).sym == "x");
+    took.restart();   // retraining cost with a well-used personal set (400 samples)
+    guessSymbol(xs, "x", seed.mid(0, 400));
+    std::printf("retrained on 400 samples: %lld ms\n", took.elapsed());
+    // calibration alignment: "sin" with the i dotted last goes to s / i (stem + dot) / n; "x=1" keeps x's and ='s
+    // strokes together; ink that cannot be the page's symbols (3 strokes, 4 symbols) is reported as such
+    ink = {};
+    write(ink, "s", 0, 4, 6);
+    qsizetype stem = ink.size();
+    ink << QPolygonF{{7, 5}, {7.2, 10}};
+    write(ink, "n", 9, 4, 6);
+    ink << QPolygonF{{6.8, 2.5}, {7.4, 2.6}};
+    QList<QList<int>> al = alignSymbols(ink, {"s", "i", "n"}, {});
+    assert(al.size() == 3 && al[1] == QList<int>({int(stem), int(ink.size() - 1)}));
+    ink = {};
+    write(ink, "x", 0, 4, 6), write(ink, "=", 8, 6, 5), write(ink, "1", 15, 3, 7);
+    al = alignSymbols(ink, {"x", "=", "1"}, {});
+    assert(al.size() == 3 && al[0].size() >= 2 && al[1].size() == 2);
+    assert(alignSymbols({QPolygonF{{0, 0}, {0, 8}}, QPolygonF{{5, 0}, {5, 8}}, QPolygonF{{10, 0}, {10, 8}}}, {"1", "1", "1", "1"}, {}).isEmpty());
     QTemporaryDir tdir;   // personal templates round-trip
     assert(saveTemplates({makeTemplate("x", ink)}, tdir.filePath("p.tpl")) && loadTemplates(tdir.filePath("p.tpl")).size() == 1);
 

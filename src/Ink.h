@@ -5,9 +5,22 @@
 #include <QRectF>
 #include <QString>
 #include <QStringList>
+#include <vector>
 
-// Handwritten math -> dock text. Strokes are grouped into symbols, each symbol is matched against written
-// samples ($P point-cloud matching), and the layout (powers, fractions, roots, ∫/∑/lim limits) comes from geometry.
+// Handwritten math -> dock text. Strokes are grouped into symbols, each symbol is classified by a small neural
+// network (trained on HWRT by tools/hwrt2tpl, its last layer retrained on the user's own samples), and the
+// layout (powers, fractions, roots, ∫/∑/lim limits) comes from geometry.
+
+// Symbol classifier: features -> ReLU hidden layer -> softmax over classes. Built in as :/inkmlp.bin.
+struct Mlp {
+    int d = 0, h = 0;
+    QStringList classes;
+    std::vector<float> w1, b1, w2, b2;   // w1: h x d, w2: classes x h, row-major
+};
+std::vector<float> inkFeatures(const QList<QPolygonF> &strokes);   // any units; Mlp::d values
+std::vector<float> mlpProbs(const Mlp &m, const std::vector<float> &features);
+Mlp loadMlp(const QString &path);   // d == 0: missing or unreadable
+bool saveMlp(const Mlp &m, const QString &path);
 
 // One written sample of a symbol: its strokes, scaled into the unit square (aspect kept, top-left at 0,0).
 // sym is what the dock text gets ("x", "2", "α", "∫", "√", "(", ...).
@@ -25,19 +38,24 @@ struct InkSymbol {
     QList<int> strokes;   // indices into the ink passed to recognizeSymbols
     QRectF box;           // ink units
     QStringList cands;    // best match first; cands[0] is used for the text
+    QList<double> probs;  // the classifier's probability of each candidate
 };
 // ink: strokes in writing order (any units, y down). Dots (tiny strokes) become "." for the layout to place.
-QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Template> &templates);
+// personal: the user's own samples; the classifier's last layer is retrained on them (cached until they change).
+// Runs of letters that are likely enough as a function name (sin, lim, ...) are read as that name.
+QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Template> &personal);
+// The given strokes of ink classified as one symbol (the dock's Split: each stroke on its own)
+InkSymbol symbolOf(const QList<QPolygonF> &ink, const QList<int> &strokes, const QList<Template> &personal);
 struct InkText {
     QString text;               // one expression per line, in the dock's syntax
     QList<QList<int>> lines;    // symbol indices of each line (for marking a line's ink later)
 };
 InkText inkLayout(const QList<InkSymbol> &symbols);
-// Calibration: the best match for one written symbol, and how clearly `expected` beats every other symbol:
-// d_rival² / (d_expected² + d_rival²) of their $P distances. 0.5: a toss-up; below: another symbol wins;
-// 0.9: expected is 3x closer than any rival.
+// Calibration: the classifier's best guess for one written symbol, and its probability for `expected`
+// (0 if it does not know that symbol yet).
 struct Guess { QString sym; double certainty; };
-Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, const QList<Template> &templates);
-// Calibration: strokes whose horizontal extents overlap form one symbol, left to right (writing in a row,
-// symbols apart). Independent of the templates, so it works before any are good.
-QList<QList<int>> splitColumns(const QList<QPolygonF> &ink);
+Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, const QList<Template> &personal);
+// Calibration: the ink split into exactly the expected symbols, in writing order (the same rules as recognition,
+// each part scored by its probability of being the symbol it should be); dots go to their nearest symbol.
+// Stroke indices per expected symbol; empty: it cannot be split that way (too few strokes, gaps inside a symbol).
+QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal);

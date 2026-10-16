@@ -1,4 +1,4 @@
-symbols.tpl (handwritten symbol templates, built into techy-notes.exe)
+symbols.tpl and inkmlp.bin (handwritten symbol data and classifier, built into techy-notes.exe)
 
 Contains information from the HWRT database of handwritten symbols by Martin Thoma
 (https://zenodo.org/records/50022), about 90% of which was collected by Daniel Kirsch for Detexify
@@ -7,4 +7,5 @@ Open Database License (ODbL) v1.0: https://opendatacommons.org/licenses/odbl/1-0
 
 symbols.tpl is a derivative database of it (up to 20 samples per symbol, one per writer, strokes resampled and
 scaled into the unit square), made by tools/hwrt2tpl.cpp, and is likewise available under the ODbL v1.0.
-The drawn shapes for = ( ) t in it were made by the Techy-Notes authors and are part of the same file.
+inkmlp.bin is a produced work: a neural network trained by tools/hwrt2tpl.cpp on HWRT's training split.
+The drawn shapes for = ( ) t were made by the Techy-Notes authors.

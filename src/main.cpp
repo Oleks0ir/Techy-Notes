@@ -455,15 +455,15 @@ static const QList<Prompt> kCalibration = {
     {"√    →    lim", "√ → l i m"},
 };
 static constexpr double kSure = 0.9, kUnsure = 0.5;   // green from, red below
-static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, const QList<Template> &seed, const QString &file,
+static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, const QString &file,
                                  const QList<Prompt> &prompts = kCalibration, const QString &title = "Calibrate handwriting");
 // Settings > Train a symbol (also from the calibration): one page with that symbol alone, its ink kept whole
 // (an i's dot and stem stay one symbol however they are placed), repeated until it is green
-static void trainSymbol(QWidget *parent, QList<Template> &personal, const QList<Template> &seed, const QString &file) {
+static void trainSymbol(QWidget *parent, QList<Template> &personal, const QString &file) {
     QString sym = QInputDialog::getText(parent, "Train a symbol", "Which symbol? (e.g. i, x, α, ∫; or a word written joined up, e.g. sin)").remove(' ');
-    if (!sym.isEmpty()) calibrateHandwriting(parent, personal, seed, file, {{sym, sym}}, "Train \"" + sym + "\"");
+    if (!sym.isEmpty()) calibrateHandwriting(parent, personal, file, {{sym, sym}}, "Train \"" + sym + "\"");
 }
-static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, const QList<Template> &seed, const QString &file,
+static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, const QString &file,
                                  const QList<Prompt> &prompts, const QString &title) {
     const int count = prompts.size();
     QDialog d(parent);
@@ -487,7 +487,7 @@ static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, con
     if (&prompts == &kCalibration) {   // a symbol that keeps going wrong: train it on its own
         auto one = new QPushButton("Train one symbol...");
         row->insertWidget(1, one);
-        QObject::connect(one, &QPushButton::clicked, [&] { trainSymbol(&d, personal, seed, file); });
+        QObject::connect(one, &QPushButton::clicked, [&] { trainSymbol(&d, personal, file); });
     }
     for (QPushButton *b : {stop, skip, next}) row->addWidget(b);
     lay->addLayout(row);
@@ -512,7 +512,7 @@ static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, con
     auto load = [&] {
         bool whole = !prompts[at].glyphs.contains(' ');
         step->setText(QString("Page %1 of %2: ").arg(at + 1).arg(count) +
-                      (whole ? "write it once." : "write it in one row, the symbols a little apart."));
+                      (whole ? "write it once." : "write it in one row."));
         show->setText(prompts[at].show);
         round = 1;
         status->clear();
@@ -520,23 +520,20 @@ static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, con
     };
     QObject::connect(&settle, &QTimer::timeout, [&] {   // guess the page, compare with the prompt
         QStringList want = prompts[at].glyphs.split(' ');
-        cols = splitColumns(pad->ink);
+        cols = alignSymbols(pad->ink, want, personal);   // the ink split into exactly the prompt's symbols
         if (want.size() == 1) {   // one symbol: all of the ink, however it falls apart
             cols = {{}};
             for (int i = 0; i < pad->ink.size(); ++i) cols[0] << i;
         }
-        QList<Template> all = personal + seed;
         pad->marks.clear();
         green = cols.size() == want.size();
-        for (int k = 0; k < cols.size(); ++k) {
+        if (!green)   // it cannot be split into those symbols: show how it reads instead, in grey
+            for (const InkSymbol &s : recognizeSymbols(pad->ink, personal)) pad->marks.append({s.box, s.cands.value(0), Qt::gray});
+        for (int k = 0; k < cols.size() && cols.size() == want.size(); ++k) {
             QList<QPolygonF> st;
             QRectF box;
             for (int i : cols[k]) st << pad->ink[i], box |= pad->ink[i].boundingRect();
-            if (cols.size() != want.size()) {   // cannot tell which symbol is which: guesses only
-                pad->marks.append({box, guessSymbol(st, "", all).sym, Qt::gray});
-                continue;
-            }
-            Guess g = guessSymbol(st, want[k], all);
+            Guess g = guessSymbol(st, want[k], personal);
             double c = g.sym == want[k] ? g.certainty : std::min(g.certainty, kUnsure - 0.01);   // wrong is red
             green = green && c >= kSure;
             QColor col = c >= kSure ? QColor(46, 160, 67) : c >= kUnsure ? QColor(212, 160, 23) : QColor(207, 34, 46);
@@ -544,8 +541,9 @@ static void calibrateHandwriting(QWidget *parent, QList<Template> &personal, con
         }
         pad->update();
         if (cols.size() != want.size()) {
-            status->setText(QString("Found %1 symbols, expected %2. Clear and write them a little further apart, or Skip.")
-                                .arg(cols.size()).arg(want.size()));
+            status->setText(QString("This ink cannot be split into the %1 symbols of the page (grey: how it reads). Maybe a "
+                                    "symbol is missing, or one has a gap inside it. Clear and write it again, or Skip.")
+                                .arg(want.size()));
             next->setText("Train");
             next->setEnabled(false);
             return;
@@ -581,6 +579,7 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Techy-Notes");
     app.setApplicationName("Techy-Notes");
+    app.setWindowIcon(QIcon(":/icon.png"));
     QMainWindow w;
     w.setWindowTitle("Techy-Notes");
     auto canvas = new Canvas;
@@ -833,16 +832,17 @@ int main(int argc, char **argv) {
     strip->setFont(QFont("Cambria", 16));
     strip->setSelectionMode(QAbstractItemView::MultiSelection);   // a tap toggles: touch and pen have no Ctrl
     strip->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed);
-    strip->setToolTip("Recognized symbols: double-tap one to rewrite it, or tap the wrong ones, then Correct or Delete");
-    auto fix = new QPushButton("Correct..."), drop = new QPushButton("Delete");
+    strip->setToolTip("Recognized symbols: double-tap one to rewrite it, or tap the wrong ones, then Correct (or merge), Split or Delete");
+    auto fix = new QPushButton("Correct..."), split = new QPushButton("Split"), drop = new QPushButton("Delete");
+    split->setToolTip("A symbol that is really several: one per stroke (then Correct them)");
     auto stripRow = new QWidget;
     auto stripLay = new QHBoxLayout(stripRow);
     stripLay->setContentsMargins(0, 0, 0, 0);
     stripLay->addWidget(strip, 1);
-    for (QPushButton *b : {fix, drop}) stripLay->addWidget(b), b->setEnabled(false);
+    for (QPushButton *b : {fix, split, drop}) stripLay->addWidget(b), b->setEnabled(false);
     stripRow->hide();
     QObject::connect(strip, &QListWidget::itemSelectionChanged, [=] {
-        for (QPushButton *b : {fix, drop}) b->setEnabled(!strip->selectedItems().isEmpty());
+        for (QPushButton *b : {fix, split, drop}) b->setEnabled(!strip->selectedItems().isEmpty());
     });
     mathLay->addWidget(mathEdit);
     mathLay->addWidget(stripRow);
@@ -864,13 +864,12 @@ int main(int argc, char **argv) {
         return head + "\n" + mathEdit->toPlainText();
     };
     // first, count: the lines of the text box that hold the recognized text (corrections rewrite only those)
-    struct Recognized { QList<QPolygonF> ink; QList<InkSymbol> syms; QList<Template> seed, personal; int first = 0, count = 0; };
+    struct Recognized { QList<QPolygonF> ink; QList<InkSymbol> syms; QList<Template> personal; int first = 0, count = 0; };
     auto rec = std::make_shared<Recognized>();
-    rec->seed = loadTemplates(":/symbols.tpl");
     const QString personalFile = rootDir + "/.templates.tpl";   // the user's own handwriting, all notebooks
     rec->personal = loadTemplates(personalFile);
-    settings->addAction("Calibrate handwriting...", [=, &w] { calibrateHandwriting(&w, rec->personal, rec->seed, personalFile); });
-    settings->addAction("Train a symbol...", [=, &w] { trainSymbol(&w, rec->personal, rec->seed, personalFile); });
+    settings->addAction("Calibrate handwriting...", [=, &w] { calibrateHandwriting(&w, rec->personal, personalFile); });
+    settings->addAction("Train a symbol...", [=, &w] { trainSymbol(&w, rec->personal, personalFile); });
     auto fillStrip = [=] {
         QSignalBlocker quiet(strip);   // filling is no edit
         strip->clear();
@@ -883,7 +882,7 @@ int main(int argc, char **argv) {
                 it->setFlags(it->flags() | Qt::ItemIsEditable);
             }
         }
-        for (QPushButton *b : {fix, drop}) b->setEnabled(false);
+        for (QPushButton *b : {fix, split, drop}) b->setEnabled(false);
     };
     auto putText = [=] {   // the recognized lines, in place in the text box; the other lines stay
         QString all = mathEdit->toPlainText();
@@ -949,6 +948,19 @@ int main(int argc, char **argv) {
         putText();
         fillStrip();
     });
+    QObject::connect(split, &QPushButton::clicked, [=] {   // wrongly joined: one symbol per stroke, classified anew
+        QList<int> picked;
+        for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
+        std::sort(picked.begin(), picked.end(), std::greater<int>());
+        for (int i : picked) {
+            QList<int> strokes = rec->syms[i].strokes;
+            if (strokes.size() < 2) continue;
+            rec->syms.removeAt(i);
+            for (int k = 0; k < strokes.size(); ++k) rec->syms.insert(i + k, symbolOf(rec->ink, {strokes[k]}, rec->personal));
+        }
+        putText();
+        fillStrip();
+    });
     QObject::connect(drop, &QPushButton::clicked, [=] {   // stray ink: left out of the text, nothing learned
         QList<int> picked;
         for (QListWidgetItem *it : strip->selectedItems()) picked << it->data(Qt::UserRole).toInt();
@@ -969,7 +981,7 @@ int main(int argc, char **argv) {
     });
     canvas->onRecognize = [=](const QList<QPolygonF> &ink) {   // new lines under what the text box holds
         rec->ink = ink;
-        rec->syms = recognizeSymbols(ink, rec->personal + rec->seed);
+        rec->syms = recognizeSymbols(ink, rec->personal);
         QString all = mathEdit->toPlainText();
         while (all.endsWith('\n')) all.chop(1);
         mathEdit->setPlainText(all);

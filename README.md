@@ -98,9 +98,10 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
 | `src/Math.h/.cpp` | Math objects: expression parser, typesetting, `y = f(x)` plots |
 | `src/Eval.cpp` | The only ExprTk user (curve evaluation), alone because it takes minutes to compile |
-| `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, $P symbol matching, layout from geometry; template files |
-| `data/symbols.tpl` | Seed symbol templates from HWRT (ODbL, see `data/LICENSE-HWRT.txt`), built in as `:/symbols.tpl` |
-| `tools/hwrt2tpl.cpp` | One-off converter HWRT CSV → `data/symbols.tpl` (`cmake --build build --target hwrt2tpl`) |
+| `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, symbol classifier (small neural net, last layer retrained on the user's samples), function-name lexicon, layout from geometry; template files |
+| `data/symbols.tpl`, `data/inkmlp.bin` | Built-in symbol samples and trained classifier from HWRT (ODbL, see `data/LICENSE-HWRT.txt`), built in as `:/symbols.tpl`, `:/inkmlp.bin` |
+| `tools/hwrt2tpl.cpp` | One-off: HWRT CSVs → `data/symbols.tpl` + trains `data/inkmlp.bin` (`cmake --build build --target hwrt2tpl`) |
+| `icon.png`, `icon.ico`, `src/app.rc` | App icon: window (`:/icon.png`) and `.exe` (icon.ico = icon.png wrapped, rebuild it when the PNG changes) |
 | `third_party/exprtk.hpp` | [ExprTk](https://github.com/ArashPartow/exprtk) (MIT), vendored |
 | `src/selftest.cpp` | Assert-based checks of the model |
 | `src/inputtest.cpp` | Canvas checks with simulated mouse, pen and touch input |
@@ -170,20 +171,29 @@ Decided: **own engine, HWRT seed templates.** Steps:
    `lim`, `d/dx`, in the parser and typesetting. Plots only use what ExprTk can evaluate.
 2. **Templates:** a one-off converter (`tools/`) turns the HWRT CSVs into `data/symbols.tpl` (~100 symbols ×
    ~20 samples, normalized strokes), embedded as a Qt resource; `licenses/HWRT.txt` (ODbL notice + attribution).
-3. **`src/Ink.h/.cpp`:** strokes → symbols (grouping by overlap and time) → $P point-cloud matching, top
-   candidates per symbol → layout from geometry (baseline, super/subscript, fraction bar, radical, ∫ limits) →
+3. **`src/Ink.h/.cpp`:** strokes → symbols (segmentation: the row's most likely split into symbols of up to 4
+   consecutive strokes, found by dynamic programming over the classifier's probabilities; strokes with a gap
+   between them are never one symbol, crossing ones get a bonus; dots join the symbol they sit above or inside;
+   98% of random close-written 3-letter rows split right, selftest) → classifier (features: 24 points along
+   the ink with pen-ups, a 12×12 picture, aspect, stroke count, length → 256 ReLU → softmax; trained on all HWRT
+   samples of our ~80 symbols with random distortion), top candidates with probabilities → function names
+   (`s1n` → `sin`) → layout from geometry (baseline, powers, fraction bar, radical, ∫ limits) →
    dock text, plus each line's stroke indices (kept for Review). Selftest feeds it ink built from templates.
 4. **UI:** selection menu / pen ring → **Recognize math** → dock: text box (freely editable) + a strip of the
    recognized symbols; tapping one lists the alternatives, a pick fixes the text and becomes a personal template
-   (`<notebook root>/.templates.tpl`, used before the seed ones). Insert asks **Replace ink** / **Keep ink**.
+   (`<notebook root>/.templates.tpl`): the classifier's last layer is retrained on them in well under a second
+   (with 5 built-in samples per symbol so the rest is not forgotten); unknown symbols become new classes.
+   Insert asks **Replace ink** / **Keep ink**.
    Several symbols can be corrected at once (one character each, or one symbol to merge them); double-tap rewrites
-   one, Delete drops stray ones. Recognized text goes in as new lines under the text box's other functions, and
+   one, Split cuts a wrongly joined symbol into one per stroke, Delete drops stray ones. Recognized text goes in as new lines under the text box's other functions, and
    corrections rewrite only those lines. A dot above a symbol joins it (i, j) whenever it was written. Kept ink stays
    linked to its object: right-click on it → **Edit math**.
 5. **Settings > Calibrate handwriting:** 12 prompts (3 each: basics, letters + Greek, functions, calculus), written
-   in a row. After each stroke the page is guessed with what was learned so far; each symbol is framed red
-   (wrong or < 50%), yellow (50–90%) or green (≥ 90%), with its guess and certainty under it (certainty: how
-   clearly the expected symbol beats its closest rival). **Train** learns all symbols of the page and asks for it
+   in a row. The ink is split into exactly the page's symbols (forced alignment: the same rules as recognition,
+   each part scored by its probability of being the symbol it should be; dots go where they help most; 97% of
+   random close-written words split exactly right, selftest). After each stroke the page is guessed with what was learned so far; each symbol is framed red
+   (wrong or < 50%), yellow (50–90%) or green (≥ 90%), with its guess and certainty under it (certainty: the
+   classifier's probability for the expected symbol). **Train** learns all symbols of the page and asks for it
    again; only when all are green does it become **Next**. Skip / Stop testing always work. **Train a symbol**
    (there or in Settings): one symbol alone, its ink kept whole, repeated until green.
 

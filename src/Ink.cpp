@@ -5,12 +5,14 @@
 #include <QSaveFile>
 #include <QSet>
 #include <algorithm>
-#include <array>
 #include <cmath>
 
 namespace {
-constexpr int N = 32;   // points per $P cloud
-using Cloud = std::array<QPointF, N>;
+constexpr int N = 32;                  // points per stored template
+constexpr int kSeq = 24, kGrid = 12;   // features: points along the ink, side of its picture
+constexpr int kFeatures = kSeq * 3 + kGrid * kGrid + 3;
+constexpr int kCands = 6;              // candidates kept per symbol
+constexpr double kNever = -1e9;        // segmentation: strokes that cannot be one symbol
 
 double length(const QPolygonF &s) {
     double l = 0;
@@ -22,19 +24,22 @@ QRectF boxOf(const QList<QPolygonF> &strokes) {
     for (const QPolygonF &s : strokes) b |= s.boundingRect();
     return b;
 }
-// n points evenly spaced along the ink; the jumps between strokes do not count
-QPolygonF resample(const QList<QPolygonF> &strokes, int n) {
+// n points evenly spaced along the ink; the jumps between strokes do not count. strokeOf: each point's stroke
+QPolygonF resample(const QList<QPolygonF> &strokes, int n, QList<int> *strokeOf = nullptr) {
     double total = 0;
     for (const QPolygonF &s : strokes) total += length(s);
     QPolygonF out{strokes[0][0]};
+    QList<int> ids{0};
     double step = total / (n - 1), acc = 0;
-    for (const QPolygonF &s : strokes) {
+    for (int k = 0; k < strokes.size(); ++k) {
+        const QPolygonF &s = strokes[k];
         QPointF prev = s[0];
         for (int i = 1; i < s.size() && step > 0;) {
             double d = QLineF(prev, s[i]).length();
             if (d > 0 && acc + d >= step) {
                 prev += (s[i] - prev) * ((step - acc) / d);
                 out << prev;
+                ids << k;
                 acc = 0;
             } else {
                 acc += d;
@@ -42,78 +47,126 @@ QPolygonF resample(const QList<QPolygonF> &strokes, int n) {
             }
         }
     }
-    while (out.size() < n) out << strokes.last().last();
+    while (out.size() < n) out << strokes.last().last(), ids << int(strokes.size()) - 1;
     out.resize(n);
+    ids.resize(n);
+    if (strokeOf) *strokeOf = ids;
     return out;
-}
-// $P: resampled, scaled by the larger side (aspect kept: "-" is not "|"), centroid at the origin
-Cloud cloudOf(const QList<QPolygonF> &strokes) {
-    QPolygonF p = resample(strokes, N);
-    QRectF b = p.boundingRect();
-    double k = 1 / std::max({b.width(), b.height(), 1e-9});
-    QPointF c;
-    for (QPointF q : p) c += q / N;
-    Cloud out;
-    for (int i = 0; i < N; ++i) out[i] = (p[i] - c) * k;
-    return out;
-}
-// Greedy matching from point `start`, earlier matches weigh more; stops once past `best`
-double cloudDist(const Cloud &a, const Cloud &b, int start, double best) {
-    std::array<bool, N> used{};
-    double sum = 0;
-    for (int k = 0; k < N; ++k) {
-        const QPointF &p = a[(start + k) % N];
-        double mn = 1e18;
-        int at = 0;
-        for (int j = 0; j < N; ++j)
-            if (!used[j]) {
-                double dx = p.x() - b[j].x(), dy = p.y() - b[j].y(), d = dx * dx + dy * dy;
-                if (d < mn) mn = d, at = j;
-            }
-        used[at] = true;
-        sum += (1 - double(k) / N) * std::sqrt(mn);
-        if (sum >= best) return sum;
-    }
-    return sum;
-}
-double match(const Cloud &a, const Cloud &b, double best) {
-    for (int i = 0; i < N; i += 5)   // step ≈ √N
-        best = std::min({best, cloudDist(a, b, i, best), cloudDist(b, a, i, best)});
-    return best;
 }
 
-struct Prepared { QString sym; Cloud cloud; double aspect; };   // aspect: log(width / height)
-double aspectOf(const QList<QPolygonF> &strokes) {
-    QRectF b = boxOf(strokes);
-    return std::log((b.width() + 1e-3 * (b.width() + b.height()) + 1e-9) / (b.height() + 1e-3 * (b.width() + b.height()) + 1e-9));
-}
-constexpr int kCands = 6;   // candidates kept per symbol
-// Symbols by their nearest sample, best first. Samples of a very different shape (a "-" for an "1") are skipped,
-// and matching stops early once a sample cannot make the top kCands.
-QList<std::pair<double, QString>> classify(const QList<QPolygonF> &strokes, const QList<Prepared> &tpl) {
-    Cloud c = cloudOf(strokes);
-    double asp = aspectOf(strokes), bound = 1e18;
-    QHash<QString, double> best;
-    QList<double> tops;   // the kCands smallest per-symbol bests
-    QList<std::pair<double, int>> rough;   // one-direction match from point 0: keep the closest 200 for the full match
-    for (int i = 0; i < tpl.size(); ++i)
-        if (std::abs(tpl[i].aspect - asp) <= 1.5) rough.append({cloudDist(c, tpl[i].cloud, 0, 1e18), i});   // ~4.5x wider or narrower: skipped
-    std::sort(rough.begin(), rough.end());
-    rough.resize(std::min<qsizetype>(rough.size(), 200));   // ponytail: calibration knob (speed vs. accuracy)
-    for (auto [r, i] : rough) {
-        const Prepared &t = tpl[i];
-        auto it = best.find(t.sym);
-        double b = it == best.end() ? 1e18 : *it, d = match(c, t.cloud, std::min(b, bound));
-        if (d >= b) continue;
-        best[t.sym] = d;
-        tops.clear();
-        for (double v : best) tops << v;
-        std::sort(tops.begin(), tops.end());
-        if (tops.size() >= kCands) bound = tops[kCands - 1];
+std::vector<float> hiddenOf(const Mlp &m, const std::vector<float> &x) {
+    std::vector<float> h(m.h);
+    for (int j = 0; j < m.h; ++j) {
+        const float *w = &m.w1[size_t(j) * m.d];
+        float s = m.b1[j];
+        for (int i = 0; i < m.d; ++i) s += w[i] * x[i];
+        h[j] = s > 0 ? s : 0;
     }
+    return h;
+}
+std::vector<float> outputOf(const Mlp &m, const std::vector<float> &h) {   // softmax
+    int c = int(m.classes.size());
+    std::vector<float> z(c);
+    float mx = -1e30f, sum = 0;
+    for (int k = 0; k < c; ++k) {
+        const float *w = &m.w2[size_t(k) * m.h];
+        float s = m.b2[k];
+        for (int j = 0; j < m.h; ++j) s += w[j] * h[j];
+        z[k] = s;
+        mx = std::max(mx, s);
+    }
+    for (float &v : z) sum += v = std::exp(v - mx);
+    for (float &v : z) v /= sum;
+    return z;
+}
+
+// The built-in classifier with its last layer retrained on the personal samples, plus kReplay built-in samples of
+// every symbol so the others are not forgotten. A personal symbol it does not know (a joined-up "sin") becomes a
+// new class. Recomputed only when the personal samples change.
+const Mlp &classifier(const QList<Template> &personal) {
+    static const Mlp base = loadMlp(":/inkmlp.bin");
+    static Mlp adapted;
+    static quint64 key = 0;
+    static bool have = false;
+    quint64 k = quint64(personal.size());
+    for (const Template &t : personal) {
+        k = k * 1000003 ^ qHash(t.sym);
+        for (const QPolygonF &s : t.strokes)
+            for (QPointF p : s) k = k * 31 + quint64(std::llround(p.x() * 1e4)) * 7 + quint64(std::llround(p.y() * 1e4));
+    }
+    if (have && k == key) return adapted;
+    have = true;
+    key = k;
+    adapted = base;
+    if (personal.isEmpty() || base.d == 0) return adapted;
+
+    constexpr int kReplay = 5;
+    static const QList<std::pair<std::vector<float>, int>> replay = [] {
+        QList<std::pair<std::vector<float>, int>> r;
+        QHash<QString, int> n;
+        for (const Template &t : loadTemplates(":/symbols.tpl"))
+            if (int c = int(base.classes.indexOf(t.sym)); c >= 0 && n[t.sym]++ < kReplay) r.append({hiddenOf(base, inkFeatures(t.strokes)), c});
+        return r;
+    }();
+    struct Sample { std::vector<float> h; int c; float w; };
+    QList<Sample> data;
+    for (const auto &[h, c] : replay) data.append({h, c, 1});
+    // the newest kRecent samples of each symbol (handwriting drifts; keeps retraining around a second at most)
+    constexpr int kRecent = 30;
+    QHash<QString, int> seen;
+    QList<const Template *> recent;
+    for (qsizetype i = personal.size() - 1; i >= 0; --i)
+        if (!personal[i].strokes.isEmpty() && seen[personal[i].sym]++ < kRecent) recent << &personal[i];
+    for (const Template *tp : recent) {   // ponytail: calibration knob, a personal sample weighs as 4 built-in ones
+        const Template &t = *tp;
+        int c = int(adapted.classes.indexOf(t.sym));
+        if (c < 0) {
+            c = int(adapted.classes.size());
+            adapted.classes << t.sym;
+            adapted.w2.resize(adapted.w2.size() + adapted.h, 0);
+            adapted.b2.push_back(0);
+        }
+        data.append({hiddenOf(base, inkFeatures(t.strokes)), c, 4});
+    }
+    // Adam on the softmax layer, full batch
+    const int C = int(adapted.classes.size()), H = adapted.h;
+    std::vector<float> m1(size_t(C) * H + C), m2(m1.size()), g(m1.size());
+    double wsum = 0;
+    for (const Sample &s : data) wsum += s.w;
+    for (int it = 1; it <= 60; ++it) {
+        std::fill(g.begin(), g.end(), 0.f);
+        for (const Sample &s : data) {
+            std::vector<float> p = outputOf(adapted, s.h);
+            for (int c = 0; c < C; ++c) {
+                float e = (p[c] - (c == s.c ? 1.f : 0.f)) * s.w;
+                if (std::abs(e) < 1e-6f) continue;
+                float *gw = &g[size_t(c) * H];
+                for (int j = 0; j < H; ++j) gw[j] += e * s.h[j];
+                g[size_t(C) * H + c] += e;
+            }
+        }
+        const float lr = 0.01f, b1 = 0.9f, b2 = 0.999f;
+        float c1 = 1 - std::pow(b1, it), c2 = 1 - std::pow(b2, it);
+        for (size_t i = 0; i < g.size(); ++i) {
+            float gi = float(g[i] / wsum);
+            m1[i] = b1 * m1[i] + (1 - b1) * gi;
+            m2[i] = b2 * m2[i] + (1 - b2) * gi * gi;
+            float step = lr * (m1[i] / c1) / (std::sqrt(m2[i] / c2) + 1e-8f);
+            (i < size_t(C) * H ? adapted.w2[i] : adapted.b2[i - size_t(C) * H]) -= step;
+        }
+    }
+    return adapted;
+}
+
+// Symbols by probability, best first, as (-log p, symbol): lower is better
+QList<std::pair<double, QString>> classify(const QList<QPolygonF> &strokes, const Mlp &m) {
+    if (m.d == 0) return {};
+    std::vector<float> p = mlpProbs(m, inkFeatures(strokes));
+    QList<int> idx;
+    for (int i = 0; i < int(p.size()); ++i) idx << i;
+    std::partial_sort(idx.begin(), idx.begin() + std::min<qsizetype>(kCands, idx.size()), idx.end(), [&](int a, int b) { return p[a] > p[b]; });
     QList<std::pair<double, QString>> out;
-    for (auto it = best.begin(); it != best.end(); ++it) out.append({it.value(), it.key()});
-    std::sort(out.begin(), out.end());
+    for (int k = 0; k < kCands && k < idx.size(); ++k) out.append({-std::log(std::max(p[idx[k]], 1e-12f)), m.classes[idx[k]]});
     return out;
 }
 bool flat(const QRectF &b) { return b.height() < 0.3 * b.width(); }   // "-", fraction bars, "="'s lines
@@ -122,7 +175,125 @@ double median(QList<double> v) {
     std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
     return v[v.size() / 2];
 }
+
+// A run of neighbouring letters that could well be a function name becomes it: each of its letters among that
+// symbol's top 4 candidates, and the name at least 1% as likely as the first choices together ("s1n" -> "sin")
+void readWords(QList<InkSymbol> &syms, double h) {
+    static const QStringList kWords{"sinh", "cosh", "tanh", "asin", "acos", "atan", "sqrt", "sin", "cos", "tan",
+                                    "exp", "abs", "lim", "log", "ln"};
+    QList<int> order;
+    for (int i = 0; i < syms.size(); ++i) order << i;
+    std::sort(order.begin(), order.end(), [&](int a, int b) { return syms[a].box.left() < syms[b].box.left(); });
+    auto next = [&](int a, int b) {   // b follows a on the same line
+        QRectF x = syms[a].box, y = syms[b].box;
+        double overlap = std::min(x.bottom(), y.bottom()) - std::max(x.top(), y.top());
+        return y.left() - x.right() < 0.8 * h && overlap > 0.4 * std::min(x.height(), y.height());
+    };
+    // x and × are one shape: × only between two digits (2×3), the letter otherwise
+    auto digit = [&](int k) { return k >= 0 && k < order.size() && syms[order[k]].cands.value(0).front().isDigit(); };
+    for (int a = 0; a < order.size(); ++a) {
+        InkSymbol &s = syms[order[a]];
+        qsizetype x = s.cands.indexOf("x");
+        if (s.cands.value(0) == "×" && x > 0 && !(digit(a - 1) && digit(a + 1))) s.cands.move(x, 0), s.probs.move(x, 0);
+    }
+    for (int a = 0; a < order.size(); ++a)
+        for (const QString &w : kWords) {
+            if (a + w.size() > order.size()) continue;
+            bool ok = true;
+            double ratio = 1;
+            for (int k = 0; k < w.size() && ok; ++k) {
+                const InkSymbol &s = syms[order[a + k]];
+                qsizetype j = s.cands.indexOf(QString(w[k]));
+                ok = j >= 0 && j < 4 && (k == 0 || next(order[a + k - 1], order[a + k]));
+                if (ok) ratio *= s.probs.value(j) / std::max(s.probs.value(0), 1e-12);
+            }
+            if (!ok || ratio < 0.01) continue;
+            for (int k = 0; k < w.size(); ++k) {
+                InkSymbol &s = syms[order[a + k]];
+                qsizetype j = s.cands.indexOf(QString(w[k]));
+                s.cands.move(j, 0);
+                s.probs.move(j, 0);
+            }
+            a += int(w.size()) - 1;
+            break;
+        }
+}
 }   // namespace
+
+std::vector<float> inkFeatures(const QList<QPolygonF> &in) {
+    QList<QPolygonF> strokes;
+    for (const QPolygonF &s : in)
+        if (!s.isEmpty()) strokes << s;
+    std::vector<float> f;
+    f.reserve(kFeatures);
+    if (strokes.isEmpty()) return std::vector<float>(kFeatures);
+    QRectF b = boxOf(strokes);
+    double side = std::max({b.width(), b.height(), 1e-9});
+    QPointF off = b.topLeft() - QPointF((side - b.width()) / 2, (side - b.height()) / 2);   // centred in the unit square
+    auto unit = [&](QPointF p) { return (p - off) / side; };
+    QList<int> ids;   // the path: kSeq points with a pen-up mark where a new stroke starts
+    QPolygonF seq = resample(strokes, kSeq, &ids);
+    for (int i = 0; i < kSeq; ++i) {
+        QPointF p = unit(seq[i]);
+        f.push_back(float(p.x()));
+        f.push_back(float(p.y()));
+        f.push_back(i > 0 && ids[i] != ids[i - 1] ? 1.f : 0.f);
+    }
+    std::vector<float> grid(kGrid * kGrid);   // the picture: cells the ink passes through
+    auto mark = [&](QPointF p) {
+        QPointF q = unit(p);
+        int x = std::clamp(int(q.x() * kGrid), 0, kGrid - 1), y = std::clamp(int(q.y() * kGrid), 0, kGrid - 1);
+        grid[size_t(y) * kGrid + x] = 1;
+    };
+    double total = 0;
+    for (const QPolygonF &s : strokes) {
+        mark(s[0]);
+        for (int i = 1; i < s.size(); ++i) {
+            int n = int(QLineF(s[i - 1], s[i]).length() / side * kGrid * 3) + 1;
+            for (int k = 1; k <= n; ++k) mark(s[i - 1] + (s[i] - s[i - 1]) * (double(k) / n));
+        }
+        total += length(s);
+    }
+    f.insert(f.end(), grid.begin(), grid.end());
+    f.push_back(float(std::clamp(std::log((b.width() + 0.01 * side) / (b.height() + 0.01 * side)) / 3, -1.5, 1.5)));
+    f.push_back(float(std::min<qsizetype>(strokes.size(), 6)) / 6);
+    f.push_back(float(std::min(total / side / 8, 2.0)));
+    return f;
+}
+
+std::vector<float> mlpProbs(const Mlp &m, const std::vector<float> &features) { return outputOf(m, hiddenOf(m, features)); }
+
+Mlp loadMlp(const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    d.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    QByteArray magic;
+    qint32 v = 0;
+    Mlp m;
+    QList<float> w1, b1, w2, b2;
+    d >> magic >> v >> m.d >> m.h >> m.classes >> w1 >> b1 >> w2 >> b2;
+    qsizetype c = m.classes.size();
+    if (d.status() != QDataStream::Ok || magic != "MLP" || v != 1 || m.d != kFeatures || w1.size() != qsizetype(m.h) * m.d ||
+        b1.size() != m.h || w2.size() != c * m.h || b2.size() != c) return {};
+    m.w1.assign(w1.begin(), w1.end());
+    m.b1.assign(b1.begin(), b1.end());
+    m.w2.assign(w2.begin(), w2.end());
+    m.b2.assign(b2.begin(), b2.end());
+    return m;
+}
+
+bool saveMlp(const Mlp &m, const QString &path) {
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    d.setFloatingPointPrecision(QDataStream::SinglePrecision);
+    auto list = [](const std::vector<float> &v) { return QList<float>(v.begin(), v.end()); };
+    d << QByteArray("MLP") << qint32(1) << qint32(m.d) << qint32(m.h) << m.classes << list(m.w1) << list(m.b1) << list(m.w2) << list(m.b2);
+    return d.status() == QDataStream::Ok && f.commit();
+}
 
 Template makeTemplate(const QString &sym, const QList<QPolygonF> &strokes) {
     QRectF box = boxOf(strokes);
@@ -130,6 +301,7 @@ Template makeTemplate(const QString &sym, const QList<QPolygonF> &strokes) {
     for (const QPolygonF &s : strokes) total += length(s);
     Template t{sym, {}};
     for (const QPolygonF &s : strokes) {   // each stroke resampled, N points shared out by length
+        if (s.isEmpty()) continue;
         QPolygonF r = resample({s}, std::max(2, int(std::lround(N * length(s) / std::max(total, 1e-9)))));
         for (QPointF &p : r) p = (p - box.topLeft()) * k;
         t.strokes << r;
@@ -160,82 +332,192 @@ bool saveTemplates(const QList<Template> &t, const QString &path) {
     return d.status() == QDataStream::Ok && f.commit();
 }
 
-QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Template> &templates) {
-    QList<Prepared> tpl;
-    for (const Template &t : templates)
-        if (!t.strokes.isEmpty() && !t.strokes[0].isEmpty()) tpl.append({t.sym, cloudOf(t.strokes), aspectOf(t.strokes)});
-    QList<double> sizes;
-    for (const QPolygonF &s : ink) sizes << std::max(s.boundingRect().width(), s.boundingRect().height());
-    double h = median(sizes);   // typical symbol size
-    auto dot = [&](const QRectF &b) { return std::max(b.width(), b.height()) < 0.3 * h; };   // ponytail: calibration knob
+namespace {
+// What recognition and calibration share: which strokes can be one symbol, and where dots go.
+struct Strokes {
+    const QList<QPolygonF> &ink;
+    double h = 1;      // typical stroke size
+    QList<int> idx;    // the strokes the segmentation splits, in writing order: no dots
+    QList<int> dots;
 
-    // Grouping: a stroke joins the symbol written just before it when their boxes are close and the joined ink
-    // matches a sample at least as well as the parts on average (x, +, =, π, i's dot). ponytail: consecutive
-    // strokes only, so an i dotted or a t crossed at the end of the line becomes its own symbol
-    struct Group { QList<int> strokes; QRectF box; QList<std::pair<double, QString>> cls; };
-    QList<Group> groups;
-    auto inkOf = [&](const QList<int> &idx) { QList<QPolygonF> s; for (int i : idx) s << ink[i]; return s; };
-    auto score = [&](const QList<int> &idx) { return dot(boxOf(inkOf(idx))) ? QList<std::pair<double, QString>>{{0, "."}} : classify(inkOf(idx), tpl); };
-    for (int i = 0; i < ink.size(); ++i) {
-        if (ink[i].isEmpty()) continue;
-        QRectF b = ink[i].boundingRect();
-        Group one{{i}, b, score({i})};
-        if (!groups.isEmpty() && groups.last().strokes.size() < 4) {
-            Group &g = groups.last();
-            QRectF gb = g.box;
-            bool near = b.left() < gb.right() + 0.15 * h && b.right() > gb.left() - 0.15 * h &&
-                        b.top() < gb.bottom() + 0.3 * h && b.bottom() > gb.top() - 0.6 * h;
-            bool crossing = b.adjusted(-0.05 * h, -0.05 * h, 0.05 * h, 0.05 * h).intersects(gb);
-            // a bar under or over a symbol is a fraction bar, not part of it ("=" is two bars: allowed); a dot
-            // written as a short dash is no bar
-            if (near && !dot(b) && (flat(b) != flat(gb)) && !crossing) near = false;
-            if (near && dot(b) && b.bottom() < gb.top() + 0.3 * gb.height()) {   // i, j
-                g.strokes << i;
-                g.box |= b;
-                g.cls = classify(inkOf(g.strokes), tpl);
+    // dotSize: below it (of the typical stroke size) a stroke is a dot
+    explicit Strokes(const QList<QPolygonF> &in, double dotSize = 0.3) : ink(in), dotSize(dotSize) {
+        QList<double> sizes;
+        for (const QPolygonF &s : ink)
+            if (!s.isEmpty()) sizes << std::max(s.boundingRect().width(), s.boundingRect().height());
+        h = median(sizes);
+        for (int i = 0; i < ink.size(); ++i)
+            if (!ink[i].isEmpty()) (dot(ink[i].boundingRect()) ? dots : idx) << i;
+    }
+    double dotSize;
+    bool gapsOk = false;   // calibration, last resort: a gap inside a symbol only makes it 20x less likely
+    bool dot(const QRectF &b) const { return std::max(b.width(), b.height()) < dotSize * h; }   // ponytail: calibration knob
+    QList<QPolygonF> inkOf(const QList<int> &g) const {
+        QList<QPolygonF> s;
+        for (int i : g) s << ink[i];
+        return s;
+    }
+    // log bonus for a stroke with box b joining a symbol with box gb; kNever: it cannot
+    double link(const QRectF &gb, const QRectF &b) const {
+        double m = 0.05 * h, below = flat(b) && flat(gb) ? 0.8 * h : 0.3 * h;   // the bars of "=" are further apart
+        bool crossing = b.adjusted(-m, -m, m, m).intersects(gb);
+        if (b.top() > gb.bottom() + below || b.bottom() < gb.top() - 0.6 * h) return kNever;
+        if (flat(b) != flat(gb) && !crossing) return kNever;   // a bar under or over a symbol: a fraction bar
+        double overlap = std::min(b.right(), gb.right()) - std::max(b.left(), gb.left()) + 2 * m;
+        if (overlap < 0) return gapsOk ? -std::log(20.0) : kNever;   // a gap between them: side by side ("li")
+        // ponytail: calibration knobs. Crossing strokes (x, +, t) and a pair of bars (=) are one symbol unless that
+        // is 10x less likely than two; strokes overlapping by 30% of the narrower (5, π, ε) unless 3x less likely;
+        // strokes that only touch (an r's arc, an m's second hump; or two cramped letters): the classifier decides
+        if (overlap < 0.3 * (std::min(b.width(), gb.width()) + 2 * m)) return 0.0;
+        return crossing || (flat(b) && flat(gb)) ? std::log(10.0) : std::log(3.0);
+    }
+    double bonus(const QList<int> &g) const {   // each stroke joining the ones before it; kNever: not one symbol
+        double sum = 0;
+        QRectF gb = ink[g[0]].boundingRect();
+        for (int t = 1; t < g.size(); ++t) {
+            double l = link(gb, ink[g[t]].boundingRect());
+            if (l <= kNever) return kNever;
+            sum += l;
+            gb |= ink[g[t]].boundingRect();
+        }
+        return sum;
+    }
+    // A dot belongs to a symbol when it is above it (the i's of "sin", dotted whenever), or inside its box (a stray
+    // tick of the pen); nearest by centre, and a symbol with a dot already counts as further (two i's side by
+    // side get one each). anywhere: every dot to its nearest symbol. Returns the dots left over.
+    QList<int> attachDots(QList<QList<int>> &groups, bool anywhere = false) const {
+        QList<QRectF> boxes;
+        QList<bool> dotted;
+        for (const QList<int> &g : groups) boxes << boxOf(inkOf(g)), dotted << false;
+        QList<int> left;
+        for (int d : dots) {
+            QRectF db = ink[d].boundingRect();
+            int best = -1;
+            auto far = [&](int k) { return std::abs(db.center().x() - boxes[k].center().x()) + (dotted[k] ? h : 0); };
+            for (int g = 0; g < groups.size(); ++g) {
+                QRectF gb = boxes[g];
+                bool above = db.center().x() > gb.left() - 0.6 * h && db.center().x() < gb.right() + 0.6 * h &&
+                             db.bottom() < gb.top() + 0.25 * gb.height() && db.bottom() > gb.top() - 1.5 * h;
+                if ((anywhere || above || gb.contains(db.center())) && (best < 0 || far(g) < far(best))) best = g;
+            }
+            if (best < 0) {
+                left << d;
                 continue;
             }
-            if (near && !dot(b) && !dot(gb) && !g.cls.isEmpty() && !one.cls.isEmpty()) {
-                QList<int> joined = g.strokes;
-                joined << i;
-                auto cls = classify(inkOf(joined), tpl);
-                double parts = (g.cls[0].first * g.strokes.size() + one.cls[0].first) / joined.size();
-                if (!cls.isEmpty() && cls[0].first <= parts) {
-                    g = {joined, gb | b, cls};
-                    continue;
-                }
-            }
+            groups[best] << d;
+            std::sort(groups[best].begin(), groups[best].end());
+            boxes[best] |= db;
+            dotted[best] = true;
         }
-        groups << one;
+        return left;
     }
-    // A dot on its own above a symbol belongs to it, whenever it was written (the i's of "sin" dotted at the end)
-    for (int d = groups.size() - 1; d >= 0; --d) {
-        if (groups[d].strokes.size() != 1 || !dot(groups[d].box)) continue;
-        QRectF db = groups[d].box;
-        int best = -1;
-        for (int g = 0; g < groups.size(); ++g) {
-            QRectF gb = groups[g].box;
-            if (g == d || dot(gb) || db.center().x() < gb.left() - 0.3 * h || db.center().x() > gb.right() + 0.3 * h ||
-                db.bottom() > gb.top() + 0.25 * gb.height() || db.bottom() < gb.top() - h) continue;
-            if (best < 0 || std::abs(db.center().x() - gb.center().x()) < std::abs(db.center().x() - groups[best].box.center().x())) best = g;
+};
+}   // namespace
+
+QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Template> &personal) {
+    // Segmentation: the strokes, in writing order, are split into symbols of up to 4 consecutive strokes so that
+    // the whole row is the most likely reading: the sum of the symbols' log-probabilities, plus each stroke's
+    // bonus for joining the ones before it (Strokes::link). Dots stay out of it and are attached afterwards.
+    const Mlp &model = classifier(personal);
+    Strokes st(ink);
+    const int n = int(st.idx.size());
+    std::vector<double> best(n + 1, -1e18);
+    std::vector<int> from(n + 1, -1);
+    best[0] = 0;
+    for (int j = 1; j <= n; ++j)
+        for (int start = std::max(0, j - 4); start < j; ++start) {   // the last symbol: strokes start..j-1
+            QList<int> g = st.idx.mid(start, j - start);
+            double bonus = st.bonus(g);
+            if (bonus <= kNever || best[start] <= -1e17) continue;
+            auto cls = classify(st.inkOf(g), model);
+            double score = best[start] + bonus - (cls.isEmpty() ? 30 : cls[0].first);
+            if (score > best[j]) best[j] = score, from[j] = start;
         }
-        if (best < 0) continue;
-        Group &g = groups[best];
-        g.strokes << groups[d].strokes;
-        std::sort(g.strokes.begin(), g.strokes.end());
-        g.box |= db;
-        g.cls = classify(inkOf(g.strokes), tpl);
-        groups.removeAt(d);
-    }
+    QList<QList<int>> groups;
+    for (int j = n; j > 0; j = from[j]) groups.prepend(st.idx.mid(from[j], j - from[j]));
+    QList<int> loose = st.attachDots(groups);   // other dots stay: a decimal point, a product dot
     QList<InkSymbol> out;
-    for (const Group &g : groups) {
-        InkSymbol s{g.strokes, g.box, {}};
-        for (int k = 0; k < g.cls.size() && k < kCands; ++k) s.cands << g.cls[k].second;
-        if (s.cands.isEmpty()) s.cands << "?";
-        out << s;
-    }
+    for (const QList<int> &g : groups) out << symbolOf(ink, g, personal);
+    for (int d : loose) out.append({{d}, ink[d].boundingRect(), {"."}, {1}});
+    std::sort(out.begin(), out.end(), [](const InkSymbol &a, const InkSymbol &b) { return a.strokes[0] < b.strokes[0]; });
+    readWords(out, st.h);
     return out;
 }
+
+static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal, double dotSize, bool gapsOk);
+
+QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal) {
+    // dots bigger than recognition's go wherever they help most; if that leaves too few strokes (a small first
+    // stroke of an r taken for a dot): recognition's dots; if a symbol still cannot be one (an r whose arc has a
+    // gap to its stem): gaps allowed, at a price
+    for (auto [dotSize, gapsOk] : {std::pair{0.45, false}, {0.3, false}, {0.3, true}})
+        if (QList<QList<int>> g = alignSymbols(ink, expected, personal, dotSize, gapsOk); !g.isEmpty()) return g;
+    return {};
+}
+
+static QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &expected, const QList<Template> &personal, double dotSize, bool gapsOk) {
+    // As recognizeSymbols, but into exactly the expected symbols, in order, each scored by its probability of
+    // being the symbol it should be
+    const Mlp &m = classifier(personal);
+    Strokes st(ink, dotSize);
+    st.gapsOk = gapsOk;
+    const int n = int(st.idx.size()), N = int(expected.size());
+    if (N == 0 || n < N || m.d == 0) return {};
+    QList<qsizetype> want;
+    for (const QString &e : expected) want << m.classes.indexOf(e);
+    qsizetype x = m.classes.indexOf("x"), times = m.classes.indexOf("×");
+    auto at = [&](int j, int k) { return size_t(j) * (N + 1) + k; };
+    std::vector<double> f(size_t(n + 1) * (N + 1), -1e18);
+    std::vector<int> from(f.size(), -1);
+    f[at(0, 0)] = 0;
+    // log-probability of strokes g being expected symbol k
+    auto logp = [&](const QList<int> &g, int k) {
+        std::vector<float> p = mlpProbs(m, inkFeatures(st.inkOf(g)));
+        if (x >= 0 && times >= 0) p[x] = p[times] = p[x] + p[times];   // one shape
+        // a symbol it does not know yet (a new personal one): neither likely nor ruled out
+        return want[k] < 0 ? std::log(0.05) : std::log(std::max(double(p[want[k]]), 1e-6));
+    };
+    for (int j = 1; j <= n; ++j)
+        for (int start = std::max(0, j - 6); start < j; ++start) {   // up to 6 strokes: careful writers add serifs
+            QList<int> g = st.idx.mid(start, j - start);
+            double bonus = st.bonus(g);
+            if (bonus <= kNever) continue;
+            for (int k = 1; k <= std::min(N, j); ++k) {
+                if (f[at(start, k - 1)] <= -1e17) continue;
+                double score = f[at(start, k - 1)] + bonus + logp(g, k - 1);
+                if (score > f[at(j, k)]) f[at(j, k)] = score, from[at(j, k)] = start;
+            }
+        }
+    if (f[at(n, N)] <= -1e17) return {};
+    QList<QList<int>> groups;
+    for (int j = n, k = N; k > 0; --k) {
+        int s = from[at(j, k)];
+        groups.prepend(st.idx.mid(s, j - s));
+        j = s;
+    }
+    // Dots (the prompts have none of their own): each to the nearby symbol it makes most likely to be what it
+    // should be (an i gains a lot from its dot, an o next to it nothing); nearby: as for recognition, else any
+    for (int d : st.dots) {
+        QRectF db = ink[d].boundingRect();
+        int best = -1;
+        double gain = -1e18;
+        for (int pass = 0; pass < 2 && best < 0; ++pass)
+            for (int k = 0; k < N; ++k) {
+                QRectF gb = boxOf(st.inkOf(groups[k]));
+                bool near = db.center().x() > gb.left() - 0.6 * st.h && db.center().x() < gb.right() + 0.6 * st.h &&
+                            db.bottom() > gb.top() - 1.5 * st.h && db.top() < gb.bottom() + 0.3 * st.h;
+                if (pass == 0 && !near) continue;
+                QList<int> with = groups[k];
+                with << d;
+                double gk = logp(with, k) - logp(groups[k], k);
+                if (gk > gain) gain = gk, best = k;
+            }
+        groups[best] << d;
+        std::sort(groups[best].begin(), groups[best].end());
+    }
+    return groups;
+}
+
 
 namespace {
 // Recursive layout of a set of symbols: left to right, a fraction bar / √ / ∫ / ∑ / lim takes the symbols
@@ -254,6 +536,14 @@ struct Layout {
 
     QString run(QList<int> ids) const {
         std::sort(ids.begin(), ids.end(), [&](int a, int b) { return box(a).left() < box(b).left(); });
+        // this run's baseline and symbol height (bars and dots left out), for telling powers apart
+        QList<double> bottoms, heights;
+        static const QString kTails = "gjpqyβγμρφχψζη";   // their baseline is at about 60% of their height
+        for (int i : ids)
+            if (!flat(box(i)) && label(i) != ".")
+                bottoms << (label(i).size() == 1 && kTails.contains(label(i)) ? box(i).top() + 0.6 * box(i).height() : box(i).bottom()),
+                    heights << box(i).height();
+        double base = median(bottoms), hh = heights.isEmpty() ? h : median(heights);
         QSet<int> done;
         QString out;
         int prev = -1;   // last symbol on the baseline (decides "." vs "·")
@@ -318,13 +608,13 @@ struct Layout {
             }
             out += t;
             prev = s;
-            // power: smaller symbols right after it whose bottom is above its middle
-            double mid = sb.top() + 0.5 * height(s);
+            // power: smaller symbols right after it, clearly above the baseline: their centre higher than 0.6 of a
+            // symbol height (an "=" or "-" sits at about 0.45; a y's tail does not matter)
             QList<int> sup;
             double right = sb.right();
             for (int i : rest()) {
                 QRectF b = box(i);
-                if (b.left() > right + 0.6 * h || b.bottom() > mid || b.height() > 0.9 * height(s)) break;
+                if (bottoms.isEmpty() || b.left() > right + 0.6 * h || b.center().y() > base - 0.6 * hh || b.height() > 0.9 * height(s)) break;
                 sup << i;
                 right = std::max(right, b.right());
             }
@@ -339,56 +629,27 @@ struct Layout {
 };
 }   // namespace
 
-Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, const QList<Template> &templates) {
-    QList<Prepared> tpl;
-    for (const Template &t : templates)
-        if (!t.strokes.isEmpty() && !t.strokes[0].isEmpty()) tpl.append({t.sym, cloudOf(t.strokes), aspectOf(t.strokes)});
-    auto cls = classify(strokes, tpl);
-    Cloud c = cloudOf(strokes);
-    double de = 1e18, dr = 1e18;   // expected: every one of its samples, also those the rough pass dropped
-    for (const Prepared &t : tpl)
-        if (t.sym == expected) de = match(c, t.cloud, de);
-    for (const auto &[d, s] : cls)
-        if (s != expected) { dr = d; break; }
-    if (de >= 1e18) return {cls.isEmpty() ? "?" : cls[0].second, 0};   // no sample of it at all
-    QString best = de <= dr ? expected : cls[0].second;
-    if (dr >= 1e18) return {best, 1};
-    return {best, dr * dr / (de * de + dr * dr + 1e-18)};
+InkSymbol symbolOf(const QList<QPolygonF> &ink, const QList<int> &strokes, const QList<Template> &personal) {
+    QList<QPolygonF> s;
+    for (int i : strokes) s << ink[i];
+    InkSymbol out{strokes, boxOf(s), {}, {}};
+    for (const auto &[cost, sym] : classify(s, classifier(personal))) out.cands << sym, out.probs << std::exp(-cost);
+    if (out.cands.isEmpty()) out.cands << "?", out.probs << 0;
+    return out;
 }
 
-QList<QList<int>> splitColumns(const QList<QPolygonF> &ink) {
-    QList<int> order;
-    for (int i = 0; i < ink.size(); ++i)
-        if (!ink[i].isEmpty()) order << i;
-    std::sort(order.begin(), order.end(), [&](int a, int b) { return ink[a].boundingRect().left() < ink[b].boundingRect().left(); });
-    QList<QList<int>> out;
-    double right = -1e18, left = 0;
-    for (int i : order) {
-        QRectF b = ink[i].boundingRect();
-        double m = 0.02 * std::max(b.width(), b.height());   // a straight "|" has no width
-        b.adjust(-m, 0, m, 0);
-        // joins the column when it overlaps it by 30% of the narrower one (neighbours touching do not join)
-        double overlap = right - b.left(), narrow = std::min(b.width(), right - left);
-        if (out.isEmpty() || overlap < 0.3 * narrow || overlap <= 0) out.append(QList<int>{}), left = b.left(), right = b.right();
-        out.last() << i;
-        right = std::max(right, b.right());
-    }
-    // dots (an i's dot beside its stem rather than over it) join the nearest column
-    QList<double> sizes;
-    for (int i : order) sizes << std::max(ink[i].boundingRect().width(), ink[i].boundingRect().height());
-    double h = median(sizes);
-    auto colBox = [&](const QList<int> &c) { QRectF b; for (int i : c) b |= ink[i].boundingRect(); return b; };
-    for (int c = out.size() - 1; c >= 0 && out.size() > 1; --c) {
-        QRectF cb = colBox(out[c]);
-        if (std::max(cb.width(), cb.height()) >= 0.3 * h) continue;
-        int best = -1;
-        for (int k = 0; k < out.size(); ++k)
-            if (k != c && (best < 0 || std::abs(colBox(out[k]).center().x() - cb.center().x()) < std::abs(colBox(out[best]).center().x() - cb.center().x()))) best = k;
-        out[best] << out[c];
-        out.removeAt(c);
-    }
-    for (QList<int> &c : out) std::sort(c.begin(), c.end());   // writing order inside a symbol
-    return out;
+Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, const QList<Template> &personal) {
+    const Mlp &m = classifier(personal);
+    if (m.d == 0) return {"?", 0};
+    std::vector<float> p = mlpProbs(m, inkFeatures(strokes));
+    // x and × are one shape: either counts for the other (the layout tells them apart by their neighbours)
+    qsizetype x = m.classes.indexOf("x"), times = m.classes.indexOf("×");
+    if (x >= 0 && times >= 0) p[x] = p[times] = p[x] + p[times];
+    int best = int(std::max_element(p.begin(), p.end()) - p.begin());
+    qsizetype e = m.classes.indexOf(expected);
+    QString sym = m.classes[best];
+    if ((sym == "×" && expected == "x") || (sym == "x" && expected == "×")) sym = expected;
+    return {sym, e < 0 ? 0.0 : double(p[e])};
 }
 
 InkText inkLayout(const QList<InkSymbol> &symbols) {
