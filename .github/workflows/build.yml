@@ -26,13 +26,18 @@ jobs:
       - name: Package
         run: |
           D=Techy-Draw
-          mkdir $D && cp build/techy-draw.exe README.md $D
+          mkdir $D $D/licenses && cp build/techy-draw.exe README.md LICENSE $D
           windeployqt6 --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw \
             --skip-plugin-types tls,networkinformation,generic $D/techy-draw.exe
           # MSYS2's Qt links MinGW DLLs (ICU, harfbuzz, ...) windeployqt doesn't copy; twice for their own deps
           for i in 1 2; do
-            find $D -name '*.dll' -o -name '*.exe' | xargs ldd | grep -i mingw64 | awk '{print $3}' | sort -u | xargs -r cp -n -t $D
+            find $D -name '*.dll' -o -name '*.exe' | xargs ldd | grep -i mingw64 | awk '{print $3}' | sort -u | tee -a deps.txt | xargs -r cp -n -t $D
           done
+          # license texts of every bundled library (Qt and glib are LGPL: notices must ship with the DLLs)
+          for p in mingw-w64-x86_64-qt6-base $(sort -u deps.txt | xargs pacman -Qqo | sort -u); do
+            cp -r /mingw64/share/licenses/${p#mingw-w64-x86_64-} $D/licenses/ 2>/dev/null || true
+          done
+          cp /mingw64/share/icu/*/LICENSE $D/licenses/icu.txt
           zip -rq Techy-Draw-${GITHUB_REF_NAME//\//-}-win64.zip $D
       - uses: actions/upload-artifact@v4
         with:

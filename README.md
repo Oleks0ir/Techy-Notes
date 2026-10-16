@@ -8,6 +8,10 @@ Derive inspired). See [VISION.md](VISION.md) for the original idea.
 Windows 10/11 x64: get `Techy-Draw-<version>-win64.zip` from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases),
 unzip anywhere, run `techy-draw.exe`. Notebooks live in `Documents\Techy-Draw`.
 
+License: GPL-3.0-or-later ([LICENSE](LICENSE)), Copyright (C) 2026 Oleks. The Windows zip bundles Qt 6 (LGPL-3.0) and other libraries from
+[MSYS2](https://packages.msys2.org) as separate, replaceable DLLs; their license texts are in `licenses/`, and their
+sources are available from [Qt](https://download.qt.io/official_releases/qt/) and the MSYS2 package pages.
+
 Releasing: push a tag `v*` (`git tag v0.1.0 && git push origin v0.1.0`); GitHub Actions builds, tests and attaches the zip.
 
 ## Stack
