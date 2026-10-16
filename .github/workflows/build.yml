@@ -1,0 +1,45 @@
+# Builds and tests on every push; a pushed tag v* also publishes a GitHub release with the Windows zip.
+name: build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write   # create the release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: zip mingw-w64-x86_64-qt6-basemingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc
+      - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
+      - run: ./build/selftest.exe && timeout 120 ./build/inputtest.exe -platform offscreen
+      - name: Package
+        run: |
+          D=Techy-Draw
+          mkdir $D && cp build/techy-draw.exe README.md $D
+          windeployqt6 --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw \
+            --skip-plugin-types tls,networkinformation,generic $D/techy-draw.exe
+          # MSYS2's Qt links MinGW DLLs (ICU, harfbuzz, ...) windeployqt doesn't copy; twice for their own deps
+          for i in 1 2; do
+            find $D -name '*.dll' -o -name '*.exe' | xargs ldd | grep -i mingw64 | awk '{print $3}' | sort -u | xargs -r cp -n -t $D
+          done
+          zip -rq Techy-Draw-${GITHUB_REF_NAME//\//-}-win64.zip $D
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Techy-Draw-win64
+          path: Techy-Draw-*-win64.zip
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Techy-Draw-*-win64.zip
+          generate_release_notes: true

@@ -4,6 +4,12 @@ A fast, native pen notebook for Windows (Android/iOS later), in the spirit of On
 long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
+## Download
+Windows 10/11 x64: get `Techy-Draw-<version>-win64.zip` from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases),
+unzip anywhere, run `techy-draw.exe`. Notebooks live in `Documents\Techy-Draw`.
+
+Releasing: push a tag `v*` (`git tag v0.1.0 && git push origin v0.1.0`); GitHub Actions builds, tests and attaches the zip.
+
 ## Stack
 - **C++20 + Qt 6 Widgets + CMake** (MinGW via MSYS2 or MSVC on Windows).
 - No web technologies. Native rendering via `QPainter`, pen input via Windows Ink (`QTabletEvent`).
