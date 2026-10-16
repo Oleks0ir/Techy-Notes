@@ -263,7 +263,7 @@ static void pageSetup(QWidget *parent, Canvas *canvas) {
 static void exportDialog(QWidget *parent, Canvas *canvas) {
     const Sheet &s = canvas->sheet;
     QList<QPoint> pages = s.exportQueue, rest = s.pages.values();
-    std::sort(rest.begin(), rest.end(), [](QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); });
+    std::sort(rest.begin(), rest.end(), rowMajor);
     for (QPoint c : rest)
         if (!pages.contains(c)) pages << c;
     enum { CellRole = Qt::UserRole, OnRole, ThumbRole, DimRole };
@@ -352,8 +352,6 @@ int main(int argc, char **argv) {
     auto canvas = new Canvas;
     w.setCentralWidget(canvas);
     QSettings st;
-    st.remove("pen/buttons");   // keys of the first calibration version
-    st.remove("pen/erases");
     canvas->eraserButtons = st.value("pen/eraser", canvas->eraserButtons).toInt();
     canvas->menuButtons = st.value("pen/menu", canvas->menuButtons).toInt();
     canvas->pressLow = st.value("pen/low", canvas->pressLow).toFloat();
@@ -393,8 +391,7 @@ int main(int argc, char **argv) {
     };
 
     auto tools = new QActionGroup(&w);
-    const char *names[] = {"Pen", "Highlighter", "Line", "Lasso", "Rect", "Snip", "Eraser"};   // Canvas::Tool order
-    for (int i = 0; i < 7; ++i) addChoice(tools, names[i], [=] { canvas->tool = Canvas::Tool(i); });
+    for (int i = 0; i < 7; ++i) addChoice(tools, Canvas::kToolNames[i], [=] { canvas->tool = Canvas::Tool(i); });
     tools->actions()[Canvas::Snip]->setToolTip("Drag a rectangle to copy that area as an image");
     auto snap = tb->addAction("15°", [=](bool on) { canvas->snapLines = on; });
     snap->setCheckable(true);
@@ -405,7 +402,7 @@ int main(int argc, char **argv) {
 
     tb->addSeparator();
     auto colors = new QActionGroup(&w);
-    for (const char *hex : {"#000000", "#1565c0", "#c62828", "#2e7d32", "#fdd835"}) {
+    for (const char *hex : Canvas::kColors) {
         QColor c(hex);
         QPixmap px(16, 16);
         px.fill(c);

@@ -121,8 +121,6 @@ QImage snapshot(const QList<Stroke> &all, const QRectF &area) {
     return img;
 }
 
-static constexpr qint32 kSheetVersion = 2;   // bump on any format change. 2: images, highlighter, locked
-
 bool saveSheet(const Sheet &s, const QString &path) {
     QSaveFile f(path);
     if (!f.open(QIODevice::WriteOnly)) return false;
@@ -189,7 +187,7 @@ void refresh(Sheet &s, bool grow) {
     QList<QPoint> fresh;
     for (QPoint c : inked)
         if (!s.exportQueue.contains(c)) fresh << c;
-    std::sort(fresh.begin(), fresh.end(), [](QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); });
+    std::sort(fresh.begin(), fresh.end(), rowMajor);
     s.exportQueue += fresh;
 }
 

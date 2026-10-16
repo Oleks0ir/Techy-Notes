@@ -10,7 +10,12 @@
 #include <QString>
 #include <QtMath>
 
+#include <utility>
+
 class QPainter;
+
+inline constexpr qint32 kSheetVersion = 2;   // bump on any format change. 2: images, highlighter, locked
+inline bool rowMajor(QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); }   // top row first
 
 struct Pt {                                                    // mm, pressure 0..1, ms timestamp
     float x, y, p; qint64 t;

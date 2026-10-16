@@ -547,7 +547,7 @@ void Canvas::copySelection() {
     QList<Stroke> out;
     for (int i : sel) out << sheet.strokes[i];
     QByteArray bytes;
-    QDataStream(&bytes, QIODevice::WriteOnly) << qint32(2) << out;   // clipboard format version = sheet's stroke format
+    QDataStream(&bytes, QIODevice::WriteOnly) << kSheetVersion << out;   // clipboard format version = sheet's stroke format
     auto md = new QMimeData;
     md->setData(kStrokesMime, bytes);
     md->setImageData(snapshot(out, selBounds()));   // for other apps
@@ -574,7 +574,7 @@ void Canvas::paste(QPointF at) {
     qint32 version = 0;
     QList<Stroke> in;
     d >> version >> in;
-    if (d.status() != QDataStream::Ok || version != 2 || in.isEmpty()) return;
+    if (d.status() != QDataStream::Ok || version != kSheetVersion || in.isEmpty()) return;
     QRectF b;
     for (const Stroke &s : in) b |= bounds(s);
     QPointF by = toWorld(at) - b.center();
@@ -626,25 +626,18 @@ void Canvas::erase(QPointF w) {
     }
 }
 
-void Canvas::undo() {
-    if (undoStack.isEmpty() || active != None) return;
-    redoStack.append(sheet.strokes);
-    sheet.strokes = undoStack.takeLast();
+void Canvas::step(QList<QList<Stroke>> &from, QList<QList<Stroke>> &to) {
+    if (from.isEmpty() || active != None) return;
+    to.append(sheet.strokes);
+    sheet.strokes = from.takeLast();
     modified();
     sel.clear();
     cacheDirty = true;
     update();
 }
 
-void Canvas::redo() {
-    if (redoStack.isEmpty() || active != None) return;
-    undoStack.append(sheet.strokes);
-    sheet.strokes = redoStack.takeLast();
-    modified();
-    sel.clear();
-    cacheDirty = true;
-    update();
-}
+void Canvas::undo() { step(undoStack, redoStack); }
+void Canvas::redo() { step(redoStack, undoStack); }
 
 void Canvas::wheelEvent(QWheelEvent *e) {
     if (e->modifiers() & Qt::ControlModifier) return zoomAt(e->position(), qPow(1.0015, e->angleDelta().y()));
@@ -686,15 +679,14 @@ void Canvas::openRing(QPointF s) {
     ring = objectActions(w);
     bool colors = ring.isEmpty() || !sel.isEmpty();   // tools ring and selection ring get the colour band
     if (ring.isEmpty()) {
-        const char *names[] = {"Pen", "Highlighter", "Line", "Lasso", "Rect", "Snip", "Eraser"};   // Tool order
-        const ushort icons[] = {0xE76D, 0xE7E6, 0xE738, 0, 0xE739, 0xE7A8, 0xE75C};          // 0: no glyph, label
-        for (int t = 0; t < 7; ++t) ring << MenuItem{QChar(icons[t]), names[t], [this, t] { tool = Tool(t); }};
+        const ushort icons[] = {0xE76D, 0xE7E6, 0xE738, 0, 0xE739, 0xE7A8, 0xE75C};   // kToolNames order; 0: no glyph, label
+        for (int t = 0; t < 7; ++t) ring << MenuItem{QChar(icons[t]), kToolNames[t], [this, t] { tool = Tool(t); }};
         ring << MenuItem{QChar(0xE77F), "Paste", [this, s] { paste(s); }}
              << MenuItem{QChar(0xE7A7), "Undo", [this] { undo(); }} << MenuItem{QChar(0xE7A6), "Redo", [this] { redo(); }};
     }
     ringInner = ring.size();
     if (colors)
-        for (const char *hex : {"#000000", "#1565c0", "#c62828", "#2e7d32", "#fdd835"})   // the toolbar presets
+        for (const char *hex : kColors)
             ring << MenuItem{QChar(), hex, [this, c = QColor(hex)] { setColor(c); }, QColor(hex)};
     ringAt = s;
     ringHot = -1;

@@ -10,6 +10,8 @@
 class Canvas : public QWidget {
 public:
     enum Tool { Pen, Highlighter, Line, Lasso, Rect, Snip, Eraser, Trim, Crop, None } tool = Pen;   // Snip: copies a rectangle as an image; Trim, Crop: picture menu only
+    static constexpr const char *kToolNames[] = {"Pen", "Highlighter", "Line", "Lasso", "Rect", "Snip", "Eraser"};   // Tool order; toolbar + pen ring
+    static constexpr const char *kColors[] = {"#000000", "#1565c0", "#c62828", "#2e7d32", "#fdd835"};   // colour presets
     Sheet sheet;
     QString path;                // open sheet file; empty: none, canvas disabled
     QColor color = Qt::black;
@@ -62,6 +64,7 @@ private:
     void erase(QPointF world);
     void addImage(const QImage &img, QPointF center);   // world mm; shrunk to fit a page, selected
     void pushUndo(const QList<Stroke> &prev);
+    void step(QList<QList<Stroke>> &from, QList<QList<Stroke>> &to);   // undo/redo: from's last state back, current onto to
     void modified();             // after any sheet edit: pages/queue follow the ink, autosave
     void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
     struct MenuItem { QChar icon; QString label; std::function<void()> run; QColor color = {}; };   // color: a swatch

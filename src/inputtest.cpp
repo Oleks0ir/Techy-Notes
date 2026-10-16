@@ -11,9 +11,8 @@
 #include <QEventLoop>
 #include <QTabletEvent>
 #include <QTouchEvent>
-#include <QWindow>
+#include <QWindow>   // qeventpoint_p.h needs it complete
 #include <private/qeventpoint_p.h>
-#include <QPainter>
 #include <QTemporaryDir>
 #include <cassert>
 #include <cstdio>
@@ -34,6 +33,22 @@ static void hoverAt(QPointF mm) { mouse(QEvent::MouseMove, mm, Qt::NoButton); }
 static void click(QPointF mm) {
     mouse(QEvent::MouseButtonPress, mm, Qt::LeftButton);
     mouse(QEvent::MouseButtonRelease, mm, Qt::NoButton);
+}
+static bool penPx(QEvent::Type t, QPointF px, Qt::MouseButtons b) {   // true: the canvas accepted it
+    QTabletEvent e(t, QPointingDevice::primaryPointingDevice(), px, cv->mapToGlobal(px), 0.8, 0, 0, 0, 0, 0, Qt::NoModifier,
+                   t == QEvent::TabletMove ? Qt::NoButton : Qt::LeftButton, b);
+    QApplication::sendEvent(cv, &e);
+    return e.isAccepted();
+}
+static void idle(int ms) {
+    QEventLoop loop;
+    QTimer::singleShot(ms, &loop, &QEventLoop::quit);
+    loop.exec();
+}
+static bool saw = false;   // a menu was open when closeMenuIn's closer ran
+static void closeMenuIn(int ms) {
+    saw = false;
+    QTimer::singleShot(ms, [] { if (auto m = QApplication::activePopupWidget()) { saw = true; m->close(); } });
 }
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } std::printf("ok: %s\n", #x); } while (0)
 
@@ -124,16 +139,6 @@ int main(int argc, char **argv) {
             QTouchEvent e(t, &touch, Qt::NoModifier, {pt});
             static_cast<QObject &>(c).event(&e);   // sendEvent drops touch from an unregistered device
         };
-        auto idle = [](int ms) {
-            QEventLoop loop;
-            QTimer::singleShot(ms, &loop, &QEventLoop::quit);
-            loop.exec();
-        };
-        bool saw = false;   // a menu was open when the closer ran
-        auto closeMenuIn = [&](int ms) {
-            saw = false;
-            QTimer::singleShot(ms, [&] { if (auto m = QApplication::activePopupWidget()) { saw = true; m->close(); } });
-        };
         finger(QEvent::TouchBegin, QEventPoint::State::Pressed, {100, 100});
         idle(700);
         CHECK(!QApplication::activePopupWidget());          // held: armed only
@@ -162,22 +167,7 @@ int main(int argc, char **argv) {
         idle(600);
     }
     {   // pen
-        auto pen = [&](QEvent::Type t, QPointF mm, Qt::MouseButtons b) {
-            QTabletEvent e(t, QPointingDevice::primaryPointingDevice(), scr(mm), c.mapToGlobal(scr(mm)), 0.8, 0, 0, 0, 0, 0,
-                           Qt::NoModifier, Qt::LeftButton, b);
-            QApplication::sendEvent(&c, &e);
-            return e.isAccepted();
-        };
-        bool saw = false;
-        auto closeMenuIn = [&](int ms) {
-            saw = false;
-            QTimer::singleShot(ms, [&] { if (auto m = QApplication::activePopupWidget()) { saw = true; m->close(); } });
-        };
-        auto idle = [](int ms) {
-            QEventLoop loop;
-            QTimer::singleShot(ms, &loop, &QEventLoop::quit);
-            loop.exec();
-        };
+        auto pen = [](QEvent::Type t, QPointF mm, Qt::MouseButtons b) { return penPx(t, scr(mm), b); };
         qsizetype n0 = s.strokes.size();
         // right-click button + tap: menu (exec blocks until the closer runs), no ink
         closeMenuIn(300);
@@ -278,9 +268,7 @@ int main(int argc, char **argv) {
         });
         QMouseEvent e(QEvent::MouseButtonPress, scr(mm), c.mapToGlobal(scr(mm)), Qt::RightButton, Qt::RightButton, Qt::NoModifier);
         QApplication::sendEvent(&c, &e);   // returns once the menu closed
-        QEventLoop loop;
-        QTimer::singleShot(600, &loop, &QEventLoop::quit);   // menu cooldown
-        loop.exec();
+        idle(600);                          // menu cooldown
     };
     c.tool = Canvas::Pen;
     QRectF pic = box();
@@ -315,11 +303,6 @@ int main(int argc, char **argv) {
 
     // pen ring: side button while hovering (Windows' flag, faked here) opens it at the tip; a tap on an item picks it,
     // a tap elsewhere closes it; that tap never draws. Windows reports the button until that tap.
-    auto penPx = [&](QEvent::Type t, QPointF px, Qt::MouseButtons b) {
-        QTabletEvent e(t, QPointingDevice::primaryPointingDevice(), px, c.mapToGlobal(px), 0.8, 0, 0, 0, 0, 0, Qt::NoModifier,
-                       t == QEvent::TabletMove ? Qt::NoButton : Qt::LeftButton, b);
-        QApplication::sendEvent(&c, &e);
-    };
     auto onRing = [](QPointF at, double deg, double r) {
         return at + QPointF(qCos(qDegreesToRadians(deg)), -qSin(qDegreesToRadians(deg))) * r;
     };

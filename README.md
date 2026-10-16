@@ -4,8 +4,6 @@ A fast, native pen notebook for Windows (Android/iOS later), in the spirit of On
 long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
-> Status: milestone 1 (window, toolbar, canvas pan/zoom, page lines).
-
 ## Stack
 - **C++20 + Qt 6 Widgets + CMake** (MinGW via MSYS2 or MSVC on Windows).
 - No web technologies. Native rendering via `QPainter`, pen input via Windows Ink (`QTabletEvent`).
