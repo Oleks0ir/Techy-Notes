@@ -97,12 +97,21 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 3. Select (lasso/rect, move, delete, copy/paste, recolor).
 4. Save/load/autosave, notebook tree, new sheet/chapter.
 5. Page growth, activation, export queue, PDF, page setup, page delete, full screen.
+6. Pictures (paste, drop, resize, crop, trim), highlighter, snip, pen ring (radial menu on the side button).
+
+## To do
+- **PDF import (next).** Needs Qt PDF: the official Qt installer (Qt 6.10 + "Qt PDF"), since MSYS2 has no
+  Qt PDF package. Sheet > Import PDF, or drop a PDF on the notebook tree → the Export page picker to choose
+  pages → a new sheet named after the PDF, pages stacked in one column, page size from the PDF's first page.
+  Each page is rendered at ~200 dpi into the image store as a locked background (`Stroke::locked`): not
+  selectable, not erasable, no picture menu; Clear/Delete page still work. Later: import into the current sheet.
 
 ## Deliberately postponed
 - Tile cache / GPU rendering — when a 10k-stroke sheet stutters.
 - Spatial index — when hit-testing shows up in a profile.
 - Stroke smoothing — if pen input looks jaggy.
-- Highlighter/opacity, export thumbnails, image paste, rotate/resize of selections.
+- Rotating selections; unreferenced images are never removed from `.images/`.
+- Pen ring on Android/iOS: the hover side-button state comes from a Windows API.
 
 ## Future: math (after V1)
 Ink-first: lasso-select a handwritten equation → a **Math side panel** shows the recognized

@@ -5,3 +5,4 @@ GUI:
 2. The sheets may be opened into a full screen mode to hyde the side panel, where the document is organized (see OneNote fo inspiration). 
 3. The tools available currently to the user from a tool panel (located at the top of the window at all times and all modes) are: Draw freehand, Draw straight line, Select.
 4. (To be added after implementing those features.)
+5. Import PDFs: complete documents or chosen pages go into a new sheet, one page per PDF page, as a locked background to write over (annotate lecture slides, worksheets, papers). Exported again as part of the sheet.
