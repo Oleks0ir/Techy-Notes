@@ -6,3 +6,5 @@ GUI:
 3. The tools available currently to the user from a tool panel (located at the top of the window at all times and all modes) are: Draw freehand, Draw straight line, Select.
 4. (To be added after implementing those features.)
 5. Import PDFs: complete documents or chosen pages go into a new sheet, one page per PDF page, as a locked background to write over (annotate lecture slides, worksheets, papers). Exported again as part of the sheet.
+6. Math: handwritten equations are recognized, shown formatted, plotted and inserted onto the canvas (Desmos-like).
+7. Review (future, optional): a checker that reviews written equations / derivation steps and highlights where something went wrong (e.g. a step that does not follow from the previous one). Evaluation/solving (2^10 =, derivatives, solve for x) may come with it, as an option.

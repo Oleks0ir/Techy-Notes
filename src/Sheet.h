@@ -14,19 +14,24 @@
 
 class QPainter;
 
-inline constexpr qint32 kSheetVersion = 2;   // bump on any format change. 2: images, highlighter, locked
+inline constexpr qint32 kSheetVersion = 4;   // bump on any format change. 2: images, highlighter, locked. 3: math. 4: link
 inline bool rowMajor(QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); }   // top row first
 
 struct Pt {                                                    // mm, pressure 0..1, ms timestamp
     float x, y, p; qint64 t;
     QPointF pos() const { return {x, y}; }
+    bool operator==(const Pt &) const = default;
 };
 // A line is a 2-point stroke. color alpha < 255: highlighter (drawn under the ink, no pressure).
-// img set: an image from the store filling the rectangle pts[0]..pts[1]; selected, moved, undone like ink.
+// img or math set: a box object filling the rectangle pts[0]..pts[1] (an image from the store, or a math
+// object drawn from its text, see drawMath); selected, moved, undone like ink, never erased.
 struct Stroke {
     QList<Pt> pts; QColor color; float width;
     QString img;          // image id (imageOf), empty for ink
     bool locked = false;  // not selectable (imported PDF page backgrounds)
+    QString math;         // math object text (Math.h), empty otherwise
+    quint32 link = 0;     // nonzero: handwriting and the math object it was recognized as (Keep ink) share it
+    bool boxed() const { return !img.isEmpty() || !math.isEmpty(); }
 };
 
 // Notebook-wide image store, <notebook root>/.images/<id>.png; set at startup.

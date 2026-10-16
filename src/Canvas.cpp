@@ -1,4 +1,5 @@
 #include "Canvas.h"
+#include "Math.h"
 #include <QApplication>
 #include <QClipboard>
 #include <QDateTime>
@@ -90,7 +91,9 @@ bool Canvas::open(const QString &file) {
     undoStack.clear();
     redoStack.clear();
     sel.clear();
-    trimIdx = cropIdx = -1;
+    trimIdx = cropIdx = mathIdx = -1;
+    inkIdx.clear();
+    inkWas.clear();
     cacheDirty = true;
     setEnabled(ok);
     update();
@@ -580,8 +583,11 @@ void Canvas::paste(QPointF at) {
     QPointF by = toWorld(at) - b.center();
     QList<Stroke> prev = sheet.strokes;
     QSet<int> added;
+    QHash<quint32, quint32> links;   // a pasted ink + object pair gets its own link, apart from the original
     for (Stroke &s : in) {
         for (Pt &p : s.pts) { p.x += by.x(); p.y += by.y(); }
+        if (s.link && !links.contains(s.link)) links[s.link] = newLink() + links.size();
+        s.link = links.value(s.link);
         added.insert(sheet.strokes.size());
         sheet.strokes << s;
     }
@@ -601,6 +607,58 @@ void Canvas::addImage(const QImage &img, QPointF center) {
     sheet.strokes << Stroke{{{float(a.x()), float(a.y()), 1, 0}, {float(b.x()), float(b.y()), 1, 0}}, Qt::black, 0, id};
     pushUndo(prev);
     select({int(sheet.strokes.size() - 1)});
+}
+
+quint32 Canvas::newLink() const {
+    quint32 m = 0;
+    for (const Stroke &s : sheet.strokes) m = std::max(m, s.link);
+    return m + 1;
+}
+
+bool Canvas::inkValid() const {
+    for (int k = 0; k < inkIdx.size(); ++k)
+        if (inkIdx[k] >= sheet.strokes.size() || sheet.strokes[inkIdx[k]].pts != inkWas[k].pts) return false;
+    return !inkIdx.isEmpty();
+}
+
+void Canvas::insertMath(const QString &math, int ink) {
+    if (path.isEmpty() || active != None) return;
+    bool at = ink && inkValid();
+    QRectF inkBox;
+    for (const Stroke &s : inkWas) inkBox |= bounds(s);
+    QSizeF mm(80, 60);
+    if (math.startsWith("eq")) {   // 6 mm text (or the ink's height), at most 90% of a page wide
+        QSizeF sz = mathSize(math);
+        if (sz.isEmpty()) return;
+        mm = sz * (at ? inkBox.height() / sz.height() : 6);
+        if (mm.width() > sheet.page.width() * 0.9) mm.scale(sheet.page * 0.9, Qt::KeepAspectRatio);
+    }
+    QPointF a = !at ? toWorld(rect().center()) - QPointF(mm.width(), mm.height()) / 2
+              : ink == 2 ? inkBox.topLeft() : inkBox.topRight() + QPointF(5, 0);
+    QPointF b = a + QPointF(mm.width(), mm.height());
+    QList<Stroke> prev = sheet.strokes;
+    quint32 link = at && ink == 1 ? newLink() : 0;   // kept ink: right-click on it edits the object too
+    if (at && ink == 2)
+        for (int k = inkIdx.size() - 1; k >= 0; --k) sheet.strokes.removeAt(inkIdx[k]);
+    if (link)
+        for (int i : inkIdx) sheet.strokes[i].link = link;
+    inkIdx.clear();
+    inkWas.clear();
+    sheet.strokes << Stroke{{{float(a.x()), float(a.y()), 1, 0}, {float(b.x()), float(b.y()), 1, 0}}, color, 0, {}, false, math, link};
+    pushUndo(prev);
+    mathIdx = sheet.strokes.size() - 1;   // Update now changes the new object
+    mathWas = math;
+    select({mathIdx});
+}
+
+bool Canvas::updateMath(const QString &math) {
+    if (mathIdx < 0 || mathIdx >= sheet.strokes.size() || sheet.strokes[mathIdx].math != mathWas || active != None) return false;
+    QList<Stroke> prev = sheet.strokes;
+    sheet.strokes[mathIdx].math = mathWas = math;
+    pushUndo(prev);
+    cacheDirty = true;
+    update();
+    return true;
 }
 
 void Canvas::dragEnterEvent(QDragEnterEvent *e) {
@@ -681,7 +739,8 @@ void Canvas::openRing(QPointF s) {
     if (ring.isEmpty()) {
         const ushort icons[] = {0xE76D, 0xE7E6, 0xE738, 0, 0xE739, 0xE7A8, 0xE75C};   // kToolNames order; 0: no glyph, label
         for (int t = 0; t < 7; ++t) ring << MenuItem{QChar(icons[t]), kToolNames[t], [this, t] { tool = Tool(t); }};
-        ring << MenuItem{QChar(0xE77F), "Paste", [this, s] { paste(s); }}
+        ring << MenuItem{QChar(0xE8EF), "Math", [this] { if (onMath) onMath(); }}
+             << MenuItem{QChar(0xE77F), "Paste", [this, s] { paste(s); }}
              << MenuItem{QChar(0xE7A7), "Undo", [this] { undo(); }} << MenuItem{QChar(0xE7A6), "Redo", [this] { redo(); }};
     }
     ringInner = ring.size();
@@ -826,19 +885,53 @@ void Canvas::clearPage(QPoint c) {
 }
 
 // The object under w (world mm) and what can be done with it: general actions first, then its own.
-// Objects: the selection, then the topmost unlocked picture. Empty: plain canvas.
-// ponytail: two kinds as plain branches; an object type when equations/graphs add more
+// Objects: the selection, then the topmost unlocked picture or math object. Empty: plain canvas.
+// ponytail: three kinds as plain branches; an object type when more kinds come
 QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
     int img = -1;
     for (int i = sheet.strokes.size() - 1; i >= 0 && img < 0; --i) {
         const Stroke &st = sheet.strokes[i];
-        if (!st.img.isEmpty() && !st.locked && QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().contains(w)) img = i;
+        if (st.boxed() && !st.locked && QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().contains(w)) img = i;
     }
-    if (!sel.isEmpty() && sel != QSet<int>{img} && selBounds().contains(w))   // a selected picture alone stays a picture
+    if (!sel.isEmpty() && sel != QSet<int>{img} && selBounds().contains(w))   // a selected object alone stays one
         return {{QChar(0xE8C6), "Cut", [this] { copySelection(); deleteSelection(); }},
                 {QChar(0xE8C8), "Copy", [this] { copySelection(); }},
-                {QChar(0xE74D), "Delete", [this] { deleteSelection(); }}};
-    if (img < 0) return {};
+                {QChar(0xE74D), "Delete", [this] { deleteSelection(); }},
+                {QChar(0xE8EF), "Recognize math", [this] {   // plain ink only, in writing order
+                     QList<int> idx = sel.values();
+                     std::sort(idx.begin(), idx.end());
+                     inkIdx.clear();
+                     inkWas.clear();
+                     QList<QPolygonF> ink;
+                     for (int i : idx) {
+                         const Stroke &s = sheet.strokes[i];
+                         if (s.boxed() || s.color.alpha() < 255) continue;
+                         inkIdx << i;
+                         inkWas << s;
+                         QPolygonF poly;
+                         for (const Pt &p : s.pts) poly << p.pos();
+                         ink << poly;
+                     }
+                     if (!ink.isEmpty() && onRecognize) onRecognize(ink);
+                 }}};
+    auto edit = [this](int i) {
+        return MenuItem{QChar(0xE70F), "Edit math", [this, i] {
+                            mathIdx = i;
+                            mathWas = sheet.strokes[i].math;
+                            if (onEditMath) onEditMath(mathWas);
+                        }};
+    };
+    if (img < 0) {   // handwriting kept next to the math object it was recognized as: edits that object
+        for (int i = sheet.strokes.size() - 1; i >= 0; --i)
+            if (const Stroke &st = sheet.strokes[i]; st.link && !st.boxed() && hits(st, w, 1.5))
+                for (int j = 0; j < sheet.strokes.size(); ++j)
+                    if (sheet.strokes[j].link == st.link && !sheet.strokes[j].math.isEmpty()) return {edit(j)};
+        return {};
+    }
+    if (!sheet.strokes[img].math.isEmpty())
+        return {edit(img),
+                {QChar(0xE7C2), "Move / resize", [this, img] { select({img}); }},
+                {QChar(0xE74D), "Delete", [this, img] { select({img}); deleteSelection(); }}};
     return {{QChar(0xE7C2), "Move / resize picture", [this, img] { select({img}); }},   // selected: any tool drags it
             {QChar(0xE74D), "Delete picture", [this, img] { select({img}); deleteSelection(); }},
             {QChar(0xE7A8), "Crop picture", [this, img] {

@@ -1,0 +1,10 @@
+symbols.tpl (handwritten symbol templates, built into techy-notes.exe)
+
+Contains information from the HWRT database of handwritten symbols by Martin Thoma
+(https://zenodo.org/records/50022), about 90% of which was collected by Daniel Kirsch for Detexify
+(https://github.com/kirel/detexify-data). The HWRT database is made available under the
+Open Database License (ODbL) v1.0: https://opendatacommons.org/licenses/odbl/1-0/
+
+symbols.tpl is a derivative database of it (up to 20 samples per symbol, one per writer, strokes resampled and
+scaled into the unit square), made by tools/hwrt2tpl.cpp, and is likewise available under the ODbL v1.0.
+The drawn shapes for = ( ) t in it were made by the Techy-Notes authors and are part of the same file.

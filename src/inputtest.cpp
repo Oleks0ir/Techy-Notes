@@ -301,6 +301,56 @@ int main(int argc, char **argv) {
     menuPick(box().center(), "Delete picture");
     CHECK(s.strokes.size() == 1 && s.strokes[0].img.isEmpty());
 
+    // math objects: Insert puts a selected 80×60 mm plot at the view centre; right-click > Edit math hands its text
+    // to the dock; Update is one undo step, and refuses once the object's text changed under it
+    QString edited;
+    c.onEditMath = [&](const QString &m) { edited = m; };
+    c.insertMath("plot -10 10 -7.5 7.5\ny = x");
+    QRectF mb(s.strokes.last().pts[0].pos(), s.strokes.last().pts[1].pos());
+    CHECK(s.strokes.size() == 2 && qAbs(mb.width() - 80) < 0.01 && qAbs(mb.height() - 60) < 0.01);
+    menuPick(mb.center(), "Edit math");
+    CHECK(edited == "plot -10 10 -7.5 7.5\ny = x");
+    CHECK(c.updateMath("plot -10 10 -7.5 7.5\ny = 2x") && s.strokes.size() == 2 && s.strokes[1].math.endsWith("2x"));
+    c.undo();
+    CHECK(s.strokes[1].math.endsWith("= x") && !c.updateMath("eq\n1"));
+    c.insertMath("eq\ny = x^2");   // equations: 6 mm text, sized to their content
+    mb = QRectF(s.strokes.last().pts[0].pos(), s.strokes.last().pts[1].pos());
+    CHECK(s.strokes.size() == 3 && mb.width() > mb.height() && mb.height() > 4 && mb.height() < 12);
+    c.undo();
+    c.undo();
+    CHECK(s.strokes.size() == 1);
+
+    // recognition: selection menu > Recognize math hands over the selected ink; Insert can put the object in its
+    // place (one undo step brings the ink back); once the ink is gone or changed, it inserts at the view centre
+    QList<QPolygonF> sent;
+    c.onRecognize = [&](const QList<QPolygonF> &ink) { sent = ink; };
+    c.tool = Canvas::Pen;
+    drag({60, 150}, {70, 156});
+    qsizetype withInk = s.strokes.size();
+    c.tool = Canvas::Rect;
+    drag({55, 145}, {75, 160});
+    menuPick({65, 153}, "Recognize math");
+    CHECK(sent.size() == 1 && sent[0].size() == s.strokes.last().pts.size() && c.inkValid());
+    c.insertMath("eq\nx", 2);
+    CHECK(s.strokes.size() == withInk && !s.strokes.last().math.isEmpty() && !c.inkValid());
+    c.undo();
+    CHECK(s.strokes.size() == withInk && s.strokes.last().math.isEmpty());
+    // Keep ink: the ink and the object share a link, so right-click on the ink > Edit math opens the object
+    c.tool = Canvas::Rect;
+    drag({55, 145}, {75, 160});
+    menuPick({65, 153}, "Recognize math");
+    c.insertMath("plot -10 10 -7.5 7.5\ny = x", 1);
+    CHECK(s.strokes.size() == withInk + 1 && s.strokes[withInk - 1].link && s.strokes.last().link == s.strokes[withInk - 1].link);
+    edited.clear();
+    menuPick({65, 153}, "Edit math");
+    CHECK(edited.startsWith("plot") && c.updateMath("plot -10 10 -7.5 7.5\ny = 2x") && s.strokes.last().math.endsWith("2x"));
+    c.undo();
+    c.undo();
+    CHECK(s.strokes.size() == withInk && !s.strokes.last().link);
+    c.undo();
+    CHECK(s.strokes.size() == 1);
+    c.tool = Canvas::Pen;
+
     // pen ring: side button while hovering (Windows' flag, faked here) opens it at the tip; a tap on an item picks it,
     // a tap elsewhere closes it; that tap never draws. Windows reports the button until that tap.
     auto onRing = [](QPointF at, double deg, double r) {
@@ -320,7 +370,7 @@ int main(int argc, char **argv) {
     QPointF at(500, 400);
     qsizetype n = s.strokes.size();
     openRingAt(at);
-    QPointF eraserItem = onRing(at, 45 + 6.5 * 18, 100);                 // 7th of 10 tool items, 18° each
+    QPointF eraserItem = onRing(at, 45 + 6.5 * 180 / 11, 100);           // 7th of 11 tool items
     penPx(QEvent::TabletMove, eraserItem, Qt::NoButton);
     tapAt(eraserItem);
     CHECK(c.tool == Canvas::Eraser && s.strokes.size() == n);

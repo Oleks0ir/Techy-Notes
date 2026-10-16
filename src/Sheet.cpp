@@ -1,4 +1,5 @@
 #include "Sheet.h"
+#include "Math.h"
 #include <QBuffer>
 #include <QCache>
 #include <QCryptographicHash>
@@ -21,7 +22,7 @@ static double segDist(QPointF p, QPointF a, QPointF b) {
 }
 
 bool hits(const Stroke &s, QPointF p, float radius) {
-    if (!s.img.isEmpty()) return false;   // the eraser leaves images alone
+    if (s.boxed()) return false;   // the eraser leaves images and math alone
     radius += s.width / 2;
     for (int i = 0; i < s.pts.size(); ++i)
         if (segDist(p, s.pts[i].pos(), s.pts[qMin(i + 1, s.pts.size() - 1)].pos()) <= radius) return true;
@@ -52,8 +53,8 @@ QSet<int> strokesInside(const QList<Stroke> &strokes, const QPolygonF &area) {
 
 QDataStream &operator<<(QDataStream &d, const Pt &p) { return d << p.x << p.y << p.p << p.t; }
 QDataStream &operator>>(QDataStream &d, Pt &p) { return d >> p.x >> p.y >> p.p >> p.t; }
-QDataStream &operator<<(QDataStream &d, const Stroke &s) { return d << s.pts << s.color << s.width << s.img << s.locked; }
-QDataStream &operator>>(QDataStream &d, Stroke &s) { return d >> s.pts >> s.color >> s.width >> s.img >> s.locked; }
+QDataStream &operator<<(QDataStream &d, const Stroke &s) { return d << s.pts << s.color << s.width << s.img << s.locked << s.math << s.link; }
+QDataStream &operator>>(QDataStream &d, Stroke &s) { return d >> s.pts >> s.color >> s.width >> s.img >> s.locked >> s.math >> s.link; }
 
 QString storeImage(const QImage &img) {
     QByteArray png;
@@ -92,6 +93,11 @@ void drawStroke(QPainter &p, const Stroke &s) {
         if (img.isNull()) p.fillRect(r, QColor(0xe0, 0xe0, 0xe0));   // file missing from the store
         else p.drawImage(r, img);
         p.restore();
+    } else if (!s.math.isEmpty()) {
+        p.save();
+        p.setPen(s.color);
+        drawMath(p, s.math, QRectF(s.pts[0].pos(), s.pts[1].pos()).normalized());
+        p.restore();
     } else if (s.color.alpha() < 255) {   // highlighter: one path, so overlapping segments don't darken
         QPolygonF poly;
         for (const Pt &pt : s.pts) poly << pt.pos();
@@ -103,7 +109,7 @@ void drawStroke(QPainter &p, const Stroke &s) {
 }
 
 void drawStrokes(QPainter &p, const QList<Stroke> &all, const QRectF &area) {
-    auto layer = [](const Stroke &s) { return !s.img.isEmpty() ? 0 : s.color.alpha() < 255 ? 1 : 2; };
+    auto layer = [](const Stroke &s) { return s.boxed() ? 0 : s.color.alpha() < 255 ? 1 : 2; };
     for (int l : {0, 1, 2})
         for (const Stroke &s : all)
             if (layer(s) == l && (area.isNull() || bounds(s).intersects(area))) drawStroke(p, s);
@@ -137,17 +143,16 @@ bool loadSheet(Sheet &s, const QString &path) {
     d.setVersion(QDataStream::Qt_6_0);
     qint32 version = 0;
     d >> version;
-    if (version != kSheetVersion && version != 1) return false;
+    if (version < 1 || version > kSheetVersion) return false;
     Sheet in;
-    if (version == 1) {   // strokes without img/locked
-        quint32 n = 0;
-        for (d >> n; n && d.status() == QDataStream::Ok; --n) {
-            Stroke st;
-            d >> st.pts >> st.color >> st.width;
-            in.strokes << st;
-        }
-    } else {
-        d >> in.strokes;
+    quint32 n = 0;   // the stroke list as QDataStream writes it, minus the fields older versions lack
+    for (d >> n; n && d.status() == QDataStream::Ok; --n) {
+        Stroke st;
+        d >> st.pts >> st.color >> st.width;
+        if (version >= 2) d >> st.img >> st.locked;
+        if (version >= 3) d >> st.math;
+        if (version >= 4) d >> st.link;
+        in.strokes << st;
     }
     d >> in.pages >> in.page >> in.exportQueue;
     if (d.status() != QDataStream::Ok) return false;
@@ -157,7 +162,7 @@ bool loadSheet(Sheet &s, const QString &path) {
 
 QSet<QPoint> inkCells(const Sheet &s, const Stroke &st, bool below) {
     QSet<QPoint> out;
-    if (!st.img.isEmpty()) {   // image: every cell its rectangle covers (edges touching a cell don't count)
+    if (st.boxed()) {   // image/math: every cell its rectangle covers (edges touching a cell don't count)
         QRectF r = QRectF(st.pts[0].pos(), st.pts[1].pos()).normalized().adjusted(0.01, 0.01, -0.01, -0.01);
         QPoint a = s.cellAt(r.topLeft()), b = s.cellAt(r.bottomRight());
         for (int y = a.y(); y <= b.y(); ++y)

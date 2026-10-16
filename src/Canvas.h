@@ -26,6 +26,9 @@ public:
     bool leftHanded = false;             // Settings: mirrors the pen ring
     static inline bool penBarrel = false; // pen side button as Windows reports it, also while hovering
     std::function<void()> onPick;        // after a ring pick: the toolbar shows the new tool/colour
+    std::function<void()> onMath;        // pen ring > Math: show/hide the math dock
+    std::function<void(const QString &)> onEditMath;   // object menu > Edit: that math object's text, for the dock
+    std::function<void(const QList<QPolygonF> &)> onRecognize;   // selection > Recognize math: its ink (mm, writing order)
 
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
@@ -41,6 +44,11 @@ public:
     void clearPage(QPoint c);    // removes the strokes touching page c (undoable)
     bool setPageSize(QSizeF mm); // false once the sheet has ink
     void setExportQueue(const QList<QPoint> &q);
+    // Selected, one undo step. ink 0: at the view centre (plots 80×60 mm, equations 6 mm text); 1: right of the
+    // recognized ink, 2: in its place (the ink is removed); equations as tall as that ink. 1/2 need inkValid().
+    void insertMath(const QString &math, int ink = 0);
+    bool inkValid() const;                  // the ink last sent to onRecognize is still there, unchanged
+    bool updateMath(const QString &math);   // the object last opened with Edit (one undo step); false: it is gone
 
 protected:
     bool event(QEvent *e) override;
@@ -106,6 +114,11 @@ private:
     bool adding = false;       // select gesture adds to the selection (Shift/Ctrl held)
     QPointF dragFrom;          // world mm
     QTransform selXf;          // selection move/resize in progress, world mm
+    int mathIdx = -1;          // math object opened with Edit, valid while its text is still mathWas
+    QString mathWas;
+    QList<int> inkIdx;         // strokes last sent to onRecognize (ascending) and their content then
+    QList<Stroke> inkWas;
+    quint32 newLink() const;   // an unused Stroke::link id
 
     QPixmap cache;             // pages + committed ink, rendered at cacheScale/cacheOffset
     double cacheScale = 0;

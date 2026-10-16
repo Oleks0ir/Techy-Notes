@@ -96,6 +96,12 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 | `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs |
 | `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
+| `src/Math.h/.cpp` | Math objects: expression parser, typesetting, `y = f(x)` plots |
+| `src/Eval.cpp` | The only ExprTk user (curve evaluation), alone because it takes minutes to compile |
+| `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, $P symbol matching, layout from geometry; template files |
+| `data/symbols.tpl` | Seed symbol templates from HWRT (ODbL, see `data/LICENSE-HWRT.txt`), built in as `:/symbols.tpl` |
+| `tools/hwrt2tpl.cpp` | One-off converter HWRT CSV → `data/symbols.tpl` (`cmake --build build --target hwrt2tpl`) |
+| `third_party/exprtk.hpp` | [ExprTk](https://github.com/ArashPartow/exprtk) (MIT), vendored |
 | `src/selftest.cpp` | Assert-based checks of the model |
 | `src/inputtest.cpp` | Canvas checks with simulated mouse, pen and touch input |
 
@@ -140,7 +146,54 @@ onto the canvas. Everything stays GPL-3-compatible open source.
   functions, laid out with `QPainter`). Evaluation for plotting: ExprTk (MIT, vendored header
   `third_party/exprtk.hpp`).
 
-**M2: recognition** of lasso-selected ink → the dock's text. Engine to be chosen (open source:
-e.g. Seshat or an ONNX model with OSS weights); points already carry pressure and timestamps.
+**M2: recognition** of lasso-selected ink → the dock's text. Lasso → selection menu / pen ring →
+**Recognize math** → dock opens with the text; Insert asks **Replace ink** or **Keep ink**.
+Points already carry pressure and timestamps.
+
+Engine survey (2026-10, licenses of code *and* weights/training data; the app must stay GPL-3):
+| Option | Code | Weights / data | Verdict |
+|---|---|---|---|
+| Seshat (falvaro/seshat) | GPL-3 ✓, C++, Boost headers + Xerces-C (InkML) | models trained on CROHME: "research purposes only" | code usable, shipped models not |
+| CoMER, BTTR, PosFormer (PyTorch → ONNX) | CoMER: no license file (= all rights reserved) | CROHME / CC BY-NC-SA | ✗ |
+| Models trained on MathWriting (Google) | — | data CC BY-NC-SA 4.0 (non-commercial) | ✗ (NC conflicts with GPL-3) |
+| HASYv2 (symbol images) | — | ODbL, 369 symbols, 32 px images (no strokes) | ✓ for training a symbol classifier, with attribution |
+| **HWRT** (Martin Thoma, zenodo 50022; ~90% Detexify data) | — | **ODbL 1.0, online strokes with timestamps**, alphanumerics, Greek, arrows, math symbols (∫ Σ √ …) | ✓ symbol templates / training; ship the subset we use as an ODbL data file + attribution |
+| Own engine: stroke grouping + symbol classifier + geometric layout parser | ours, GPL-3 | templates written by the user (+ optionally HASYv2) | ✓ |
+
+All ready-made math recognizers are trained on non-commercial data, so their weights are out. Single-symbol
+stroke data with a free license exists (HWRT); whole-expression data does not, so layout (powers, fractions, roots,
+∫ limits) is parsed from geometry rather than learned. Templates the user corrects in the dock are added
+(personal handwriting improves over time).
+
+Decided: **own engine, HWRT seed templates.** Steps:
+1. **Notation (typed first):** Greek names (`alpha` → α, `theta`, …), `int(a, b, f)` / ∫ with limits, `sum`,
+   `lim`, `d/dx`, in the parser and typesetting. Plots only use what ExprTk can evaluate.
+2. **Templates:** a one-off converter (`tools/`) turns the HWRT CSVs into `data/symbols.tpl` (~100 symbols ×
+   ~20 samples, normalized strokes), embedded as a Qt resource; `licenses/HWRT.txt` (ODbL notice + attribution).
+3. **`src/Ink.h/.cpp`:** strokes → symbols (grouping by overlap and time) → $P point-cloud matching, top
+   candidates per symbol → layout from geometry (baseline, super/subscript, fraction bar, radical, ∫ limits) →
+   dock text, plus each line's stroke indices (kept for Review). Selftest feeds it ink built from templates.
+4. **UI:** selection menu / pen ring → **Recognize math** → dock: text box (freely editable) + a strip of the
+   recognized symbols; tapping one lists the alternatives, a pick fixes the text and becomes a personal template
+   (`<notebook root>/.templates.tpl`, used before the seed ones). Insert asks **Replace ink** / **Keep ink**.
+   Several symbols can be corrected at once (one character each, or one symbol to merge them); double-tap rewrites
+   one, Delete drops stray ones. Recognized text goes in as new lines under the text box's other functions, and
+   corrections rewrite only those lines. A dot above a symbol joins it (i, j) whenever it was written. Kept ink stays
+   linked to its object: right-click on it → **Edit math**.
+5. **Settings > Calibrate handwriting:** 12 prompts (3 each: basics, letters + Greek, functions, calculus), written
+   in a row. After each stroke the page is guessed with what was learned so far; each symbol is framed red
+   (wrong or < 50%), yellow (50–90%) or green (≥ 90%), with its guess and certainty under it (certainty: how
+   clearly the expected symbol beats its closest rival). **Train** learns all symbols of the page and asks for it
+   again; only when all are green does it become **Next**. Skip / Stop testing always work. **Train a symbol**
+   (there or in Settings): one symbol alone, its ink kept whole, repeated until green.
 
 **Later:** parameters with sliders, implicit `f(x,y)=0`, parametric/polar.
+
+**Future, optional: Review.** A checker for written math: it follows the steps of a derivation (lines in a
+lasso selection, top to bottom) and highlights the first one that does not follow from the one before, plus
+evaluate/solve (`2^10 =`, derivatives, solve for x). Not planned yet; the modules are kept ready for it:
+- recognition returns text **per line with each line's ink stroke indices**, so a checker can mark the ink
+  of a wrong step (highlight over those strokes) without knowing about recognition;
+- the parser's `MathNode` tree is the one shared representation: plotting, typesetting and a later checker all
+  read it (a numeric check needs only ExprTk: compare both sides at sample points; a symbolic one a GPL-compatible
+  CAS, e.g. SymEngine).

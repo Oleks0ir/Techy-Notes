@@ -38,6 +38,7 @@ jobs:
             cp -r /mingw64/share/licenses/${p#mingw-w64-x86_64-} $D/licenses/ 2>/dev/null || true
           done
           cp /mingw64/share/icu/*/LICENSE $D/licenses/icu.txt
+          cp data/LICENSE-HWRT.txt $D/licenses/   # ODbL notice for the built-in symbol templates
           zip -rq Techy-Notes-${GITHUB_REF_NAME//\//-}-win64.zip $D
       - uses: actions/upload-artifact@v4
         with:

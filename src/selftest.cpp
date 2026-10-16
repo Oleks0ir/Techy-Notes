@@ -1,13 +1,128 @@
 #undef NDEBUG   // asserts must run in Release builds too
+#include "Ink.h"
+#include "Math.h"
 #include "Sheet.h"
+#include <QElapsedTimer>
 #include <QFile>
+#include <QGuiApplication>
+#include <QPainter>
 #include <QIODevice>
 #include <QLineF>
 #include <QTemporaryDir>
 #include <cassert>
 #include <cstdio>
 
-int main() {
+int main(int argc, char **argv) {
+    qputenv("QT_QPA_PLATFORM", "offscreen");
+    QGuiApplication app(argc, argv);   // fonts for typesetting
+
+    // math: parsing (implicit products, precedence, functions), errors, ExprTk form
+    auto ex = [](const char *s) { QString err; MathNode n = parseMath(s, &err); assert(err.isEmpty()); return exprtkOf(n); };
+    assert(ex("x^2 - 2x") == "((x^2)-(2*x))");
+    assert(ex("2sin(x)/x") == "((2*sin(x))/x)");
+    assert(ex("-x^2") == "(-(x^2))" && ex("2^3^2") == "(2^(3^2))" && ex("x^-1") == "(x^(-1))");
+    assert(ex("|x-1|") == "abs((x-1))" && typeset(nullptr, parseMath("sin(x)"), 0, 0, 10).w > typeset(nullptr, parseMath("(x)"), 0, 0, 10).w + 10);
+    assert(ex("sqrt(x+1)") == "sqrt((x+1))" && ex("ln(x) + log(x)") == "(log(x)+log10(x))" && ex("sin x") == "sin(x)");
+    assert(ex("pi x") == "(pi*x)" && ex("xy") == "(x*y)" && ex("(x+1)(x-1)") == "((x+1)*(x-1))" && ex("2e") == "(2*2.718281828459045)");
+    assert(ex("x² − 2·π") == "((x^2)-(2*pi))" && ex("√x ÷ 2") == "(sqrt(x)/2)");   // touch keyboard / recognizer symbols
+    assert(compileCurve("(x^2)")(3) == 9 && !compileCurve("(a*x)"));
+    // notation: Greek by name, ∫ with limits and dx, ∑, lim with an arrow, d/dx; none of them is plotted
+    MathNode ig = parseMath("int_0^(2pi) sin(x)^2 + 1 dx");
+    assert(ig.k == 'I' && ig.s == "x" && ig.a[0].k == '+' && ig.a[1].s == "0" && ig.a[2].k == '(' && exprtkOf(ig) == "?");
+    assert(parseMath("∫x dx").k == 'I' && parseMath("int_-1^1 x dx").a[1].k == '~');
+    MathNode sm = parseMath("sum_(n=1)^inf 1/n^2");
+    assert(sm.k == 'S' && sm.a[1].a[0].k == '=' && sm.a[2].s == "inf" && sm.a[0].k == '/');
+    MathNode lm = parseMath("lim_(x->0) sin(x)/x");
+    assert(lm.k == 'L' && lm.a[1].a[0].k == '>' && lm.a[0].k == '/');
+    assert(parseMath("x → ∞").k == '>' && parseMath("d/dx x^2").k == 'D' && parseMath("d/dx x^2").s == "x");
+    assert(ex("theta + alpha") == "(θ+α)" && ex("Theta beta eta") == "((Θ*β)*η)" && ex("epsilon psi") == "(ε*ψ)");
+    assert(ex("d(x)") == "(d*(x))" && ex("x - 1") == "(x-1)");   // plain d and minus still work
+    // functions: g(x) = 2x plots 2x; calls of names defined in any line expand, other letter( stays a product
+    QStringList fl{"f(x) = x^2", "g(t) = 2t", "y = f(x-1) + g(x)", "a(x+1)", "y = h(x)"};
+    assert(exprtkOf(curveOf(fl, 0)) == "(x^2)" && exprtkOf(curveOf(fl, 1)) == "(2*x)");
+    assert(exprtkOf(curveOf(fl, 2)) == "(((x-1)^2)+(2*x))" && curveOf(fl, 3).k == 'c' && curveOf(fl, 4).k == 'c');
+    assert(curveOf({"f(x) = f(x)"}, 0).k == 0 && curveOf({"x = 3"}, 0).k == 0 && curveOf(fl, 9).k == 0);
+    for (const char *t : {"int_0^1 x^2 dx", "sum_(k=0)^n k", "lim_(h->0) (f(x+h) - f(x))/h", "d/dt t^2"})
+        assert(typeset(nullptr, parseMath(t), 0, 0, 10).up > 8.5);   // taller than a digit (0.8 s)
+    MathNode eq = parseMath("y = x/2");
+    assert(eq.k == '=' && eq.a[0].k == 'v' && eq.a[1].k == '/');
+    for (const char *bad : {"", "x+", "(x", "x)", "2*/3", "x#"}) {
+        QString err;
+        MathNode n = parseMath(bad, &err);
+        assert(!err.isEmpty() && n.k == 'n' && n.s == bad);   // shown as plain text
+    }
+    // typesetting: a fraction is taller than a plain number, an exponent widens less than a full-size digit
+    MathBox one = typeset(nullptr, parseMath("1"), 0, 0, 10), half = typeset(nullptr, parseMath("1/2"), 0, 0, 10);
+    assert(half.up > one.up && half.down > one.down && half.up + half.down > 1.5 * (one.up + one.down));
+    assert(typeset(nullptr, parseMath("x^2"), 0, 0, 10).w < typeset(nullptr, parseMath("x2"), 0, 0, 10).w);
+    // plot: y = x in [-10,10]² crosses (5,5) and not (5,-5); unknown variables and bad lines are skipped
+    QImage plot(200, 200, QImage::Format_RGB32);
+    plot.fill(Qt::white);
+    {
+        QPainter pp(&plot);
+        pp.setRenderHint(QPainter::Antialiasing);
+        drawMath(pp, "plot -10 10 -10 10\ny = x\ny = a x\nx+", plot.rect());
+        drawMath(pp, "eq\ny = x^2/2\nsqrt(x)", QRectF(0, 0, 40, 20));   // smoke: typeset objects draw
+    }
+    auto curveAt = [&](int x, int y) {
+        for (int dx = -1; dx <= 1; ++dx)
+            for (int dy = -1; dy <= 1; ++dy)
+                if (QColor c = plot.pixelColor(x + dx, y + dy); c.red() > c.green() + 60) return true;
+        return false;
+    };
+    assert(curveAt(150, 50) && !curveAt(150, 150));
+
+    // ink recognition: seed templates placed like handwriting (grouping and layout; their matches are exact)
+    QList<Template> seed = loadTemplates(":/symbols.tpl");
+    assert(seed.size() > 1000);
+    auto write = [&](QList<QPolygonF> &ink, const QString &sym, double x, double y, double size) {
+        auto t = std::find_if(seed.begin(), seed.end(), [&](const Template &t) { return t.sym == sym; });
+        assert(t != seed.end());
+        for (QPolygonF st : t->strokes) {
+            for (QPointF &p : st) p = QPointF(x, y) + p * size;
+            ink << st;
+        }
+    };
+    auto read = [&](const QList<QPolygonF> &ink) { return inkLayout(recognizeSymbols(ink, seed)).text; };
+    QElapsedTimer took;
+    took.start();
+    QList<QPolygonF> ink;
+    write(ink, "x", 0, 10, 8), write(ink, "2", 9, 4, 5), write(ink, "+", 16, 11, 6), write(ink, "1", 25, 10, 8);
+    QString got = read(ink);
+    std::printf("ink: %s (%lld ms)\n", qPrintable(got), took.elapsed());
+    assert(got == "x^2+1");
+    ink = {};
+    write(ink, "1", 1, 0, 6), write(ink, "-", -1, 8, 9), write(ink, "2", 1, 11, 6);
+    std::printf("ink: %s\n", qPrintable(got = read(ink)));
+    assert(got == "(1)/(2)");
+    ink = {};
+    write(ink, "∫", 0, 0, 14), write(ink, "1", 7, -2, 4), write(ink, "0", 5, 12, 4);
+    write(ink, "x", 11, 6, 5), write(ink, "d", 17, 4, 7), write(ink, "x", 23, 6, 5);
+    MathNode integral = parseMath(got = read(ink));
+    std::printf("ink: %s\n", qPrintable(got));
+    assert(integral.k == 'I' && integral.s == "x" && integral.a[1].a[0].s == "0");   // limits come in parentheses
+    ink = {};
+    write(ink, "1", 0, 0, 6), write(ink, "2", 0, 20, 6);
+    assert(read(ink) == "1\n2" && inkLayout(recognizeSymbols(ink, seed)).lines.size() == 2);
+    // an i dotted at the end of the word, the dot a short dash: still one symbol with its stem
+    ink = {QPolygonF{{0, 4}, {0.2, 10}}};
+    write(ink, "n", 3, 4, 6);
+    qsizetype dotAt = ink.size();
+    ink << QPolygonF{{-0.3, 2}, {0.5, 2.1}};
+    QList<InkSymbol> word = recognizeSymbols(ink, seed);
+    assert(word.size() == 2 && word[0].strokes == QList<int>({0, int(dotAt)}));
+    // calibration score: a sample of x is x for sure; expected as "o" it loses (below 0.5) and the guess says x
+    QList<QPolygonF> xs;
+    write(xs, "x", 0, 0, 10);
+    Guess gx = guessSymbol(xs, "x", seed), go = guessSymbol(xs, "o", seed);
+    assert(gx.sym == "x" && gx.certainty > 0.9 && go.sym == "x" && go.certainty < 0.5);
+    // calibration split: "=" (two overlapping lines) and an "i" (stem + dot) are one symbol each, the gap separates
+    QList<QPolygonF> cols{QPolygonF{{0, 0}, {10, 0}}, QPolygonF{{0, 5}, {10, 5}}, QPolygonF{{20, 2}, {20, 10}},
+                          QPolygonF{{20, -1}, {20.3, -0.7}}, QPolygonF{{30, 0}, {33, 10}}, QPolygonF{{32.7, 0}, {38, 10}}};
+    assert(splitColumns(cols) == QList<QList<int>>({{0, 1}, {2, 3}, {4}, {5}}));   // 4 and 5 touch: 2 symbols
+    QTemporaryDir tdir;   // personal templates round-trip
+    assert(saveTemplates({makeTemplate("x", ink)}, tdir.filePath("p.tpl")) && loadTemplates(tdir.filePath("p.tpl")).size() == 1);
+
     Sheet s;
     assert(s.pages.contains(QPoint(0, 0)));
     assert(s.pageRect(QPoint(-1, 2)) == QRectF(-210, 594, 210, 297));
@@ -144,5 +259,27 @@ int main() {
     }
     assert(loadSheet(ld, tmp.filePath("v1.tsheet")) && ld.strokes.size() == 1 && ld.strokes[0].pts[1].x == 10 &&
            ld.strokes[0].img.isEmpty() && ld.pages == sh.pages && ld.exportQueue == sh.exportQueue);
+    // version 2 sheets (no math) still load
+    {
+        QFile v2(tmp.filePath("v2.tsheet"));
+        assert(v2.open(QIODevice::WriteOnly));
+        QDataStream d(&v2);
+        d.setVersion(QDataStream::Qt_6_0);
+        d << qint32(2) << quint32(1) << bg.pts << bg.color << bg.width << bg.img << bg.locked << sh.pages << sh.page << sh.exportQueue;
+    }
+    assert(loadSheet(ld, tmp.filePath("v2.tsheet")) && ld.strokes.size() == 1 && ld.strokes[0].img == id &&
+           ld.strokes[0].locked && ld.strokes[0].math.isEmpty() && ld.pages == sh.pages);
+
+    // math objects: a box like a picture (pages, never erased), saved, drawn in their own color
+    Stroke eqObj{{{10, 10, 1, 0}, {50, 30, 1, 0}}, Qt::blue, 0, {}, false, "eq\ny = x^2", 5};
+    assert(eqObj.boxed() && !hits(eqObj, {30, 20}, 1) && inkCells(g, eqObj) == QSet<QPoint>({{0, 0}}));
+    g.strokes = {eqObj, {{{0, 40, 1, 0}, {100, 100, 1, 0}}, Qt::black, 0, {}, false, "plot -10 10 -10 10\ny = x"}};
+    assert(saveSheet(g, tmp.filePath("m.tsheet")) && loadSheet(ld, tmp.filePath("m.tsheet")) && ld.strokes[0].math == eqObj.math && ld.strokes[0].link == 5 &&
+           ld.strokes[1].math.startsWith("plot"));
+    QImage ms = snapshot(g.strokes, QRectF(0, 0, 100, 100));
+    bool blue = false;
+    for (int y = 10 * 6; y < 30 * 6; ++y)
+        for (int x = 10 * 6; x < 50 * 6; ++x) blue |= ms.pixelColor(x, y).blue() > ms.pixelColor(x, y).red() + 100;
+    assert(blue);
     std::puts("selftest ok");
 }
