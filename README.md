@@ -1,12 +1,12 @@
-# Techy-Draw
+# Techy-Notes
 
 A fast, native pen notebook for Windows (Android/iOS later), in the spirit of OneNote — with a
 long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
 ## Download
-Windows 10/11 x64: get `Techy-Draw-<version>-win64.zip` from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases),
-unzip anywhere, run `techy-draw.exe`. Notebooks live in `Documents\Techy-Draw`.
+Windows 10/11 x64: get `Techy-Notes-<version>-win64.zip` from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases),
+unzip anywhere, run `techy-notes.exe`. Notebooks live in `Documents\Techy-Notes`.
 
 License: GPL-3.0-or-later ([LICENSE](LICENSE)), Copyright (C) 2026 Oleks. The Windows zip bundles Qt 6 (LGPL-3.0) and other libraries from
 [MSYS2](https://packages.msys2.org) as separate, replaceable DLLs; their license texts are in `licenses/`, and their
@@ -26,7 +26,7 @@ cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/selftest.exe     # model self-check (asserts)
 ./build/inputtest.exe -platform offscreen   # simulated mouse/pen/touch on the canvas
-./build/techy-draw.exe
+./build/techy-notes.exe
 ```
 MSVC + official Qt kit also works: `cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"` (`QT_DIR` noted in `.env`),
 `cmake --build build --config Release`, binaries in `build/Release/`.
@@ -108,7 +108,7 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 6. Pictures (paste, drop, resize, crop, trim), highlighter, snip, pen ring (radial menu on the side button).
 
 ## To do
-- **PDF import (next).** Needs Qt PDF: the official Qt installer (Qt 6.10 + "Qt PDF"), since MSYS2 has no
+- **PDF import.** Needs Qt PDF: the official Qt installer (Qt 6.10 + "Qt PDF"), since MSYS2 has no
   Qt PDF package. Sheet > Import PDF, or drop a PDF on the notebook tree → the Export page picker to choose
   pages → a new sheet named after the PDF, pages stacked in one column, page size from the PDF's first page.
   Each page is rendered at ~200 dpi into the image store as a locked background (`Stroke::locked`): not
@@ -121,9 +121,26 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 - Rotating selections; unreferenced images are never removed from `.images/`.
 - Pen ring on Android/iOS: the hover side-button state comes from a Windows API.
 
-## Future: math (after V1)
-Ink-first: lasso-select a handwritten equation → a **Math side panel** shows the recognized
-equation, lets you format it nicely and plot it → paste the plot onto the canvas as a crisp vector
-snapshot. Input is math notation only (Desmos-style), with room for a richer language later.
-The recognition engine is still to be chosen. V1 already stores pressure and timestamps per point
-so recognition can use them.
+## Math (in progress, branch `dev`)
+Goal: lasso-select a handwritten equation → a **Math dock** shows it formatted and plotted → insert it
+onto the canvas. Everything stays GPL-3-compatible open source.
+
+**Milestone M1: typed input** (handwriting recognition comes later and only has to fill the text box)
+- **Math dock** (right side; ∑ toolbar button and pen-ring entry): one expression per line, Desmos-style
+  (`y = x^2 - 2x`, `sin(x)/x`, `2x`). Below it: the formatted equations and a live plot, pan/zoom with
+  pen, finger, mouse.
+- Plot: several `y = f(x)` curves, one color each, axes + grid + tick numbers.
+- **Insert** places a **math object** at the screen center (80×60 mm), already selected so it can be moved/resized
+  right away. Two kinds: plot, equation (typeset).
+- On the canvas the object is non-interactive, drawn as vector from its stored text (crisp in PDF).
+  Right-click → **Edit** loads it into the dock; **Update** writes it back (one undo step).
+- Model: like pictures, a `Stroke` whose `pts[0..1]` is the rectangle, plus `QString math` (expressions +
+  view range). Select/move/resize/undo/copy/PDF reuse the picture paths. Sheet format v3.
+- Parsing: own recursive-descent parser → tree used for typesetting (fractions, powers, roots,
+  functions, laid out with `QPainter`). Evaluation for plotting: ExprTk (MIT, vendored header
+  `third_party/exprtk.hpp`).
+
+**M2: recognition** of lasso-selected ink → the dock's text. Engine to be chosen (open source:
+e.g. Seshat or an ONNX model with OSS weights); points already carry pressure and timestamps.
+
+**Later:** parameters with sliders, implicit `f(x,y)=0`, parametric/polar.

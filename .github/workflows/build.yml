@@ -25,10 +25,10 @@ jobs:
       - run: ./build/selftest.exe && timeout 120 ./build/inputtest.exe -platform offscreen
       - name: Package
         run: |
-          D=Techy-Draw
-          mkdir $D $D/licenses && cp build/techy-draw.exe README.md LICENSE $D
+          D=Techy-Notes
+          mkdir $D $D/licenses && cp build/techy-notes.exe README.md LICENSE $D
           windeployqt6 --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw \
-            --skip-plugin-types tls,networkinformation,generic $D/techy-draw.exe
+            --skip-plugin-types tls,networkinformation,generic $D/techy-notes.exe
           # MSYS2's Qt links MinGW DLLs (ICU, harfbuzz, ...) windeployqt doesn't copy; twice for their own deps
           for i in 1 2; do
             find $D -name '*.dll' -o -name '*.exe' | xargs ldd | grep -i mingw64 | awk '{print $3}' | sort -u | tee -a deps.txt | xargs -r cp -n -t $D
@@ -38,13 +38,13 @@ jobs:
             cp -r /mingw64/share/licenses/${p#mingw-w64-x86_64-} $D/licenses/ 2>/dev/null || true
           done
           cp /mingw64/share/icu/*/LICENSE $D/licenses/icu.txt
-          zip -rq Techy-Draw-${GITHUB_REF_NAME//\//-}-win64.zip $D
+          zip -rq Techy-Notes-${GITHUB_REF_NAME//\//-}-win64.zip $D
       - uses: actions/upload-artifact@v4
         with:
-          name: Techy-Draw-win64
-          path: Techy-Draw-*-win64.zip
+          name: Techy-Notes-win64
+          path: Techy-Notes-*-win64.zip
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Techy-Draw-*-win64.zip
+          files: Techy-Notes-*-win64.zip
           generate_release_notes: true

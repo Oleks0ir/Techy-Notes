@@ -1,4 +1,4 @@
-# Techy-Draw
+# Techy-Notes
 
 Native pen notebook. Product spec and architecture: README.md. Original idea: VISION.md.
 

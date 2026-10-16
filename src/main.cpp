@@ -215,7 +215,7 @@ static void calibratePen(QWidget *parent, Canvas *canvas) {
 
 static void pageSetup(QWidget *parent, Canvas *canvas) {
     if (!canvas->sheet.strokes.isEmpty())
-        return (void)QMessageBox::information(parent, "Techy-Draw", "The page size can only change while the sheet is empty.");
+        return (void)QMessageBox::information(parent, "Techy-Notes", "The page size can only change while the sheet is empty.");
     QDialog dlg(parent);
     dlg.setWindowTitle("Page setup");
     const char *names[] = {"A4", "A5", "Letter", "Custom"};
@@ -336,22 +336,26 @@ static void exportDialog(QWidget *parent, Canvas *canvas) {
         if (s.exportQueue.contains(c)) queue << c;
     }
     canvas->setExportQueue(queue);
-    if (chosen.isEmpty()) return (void)QMessageBox::information(parent, "Techy-Draw", "No page chosen.");
+    if (chosen.isEmpty()) return (void)QMessageBox::information(parent, "Techy-Notes", "No page chosen.");
     QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
     QString file = QFileDialog::getSaveFileName(parent, "Export PDF", docs + "/" + QFileInfo(canvas->path).completeBaseName() + ".pdf",
                                                 "PDF (*.pdf)");
-    if (!file.isEmpty() && !exportPdf(s, chosen, file)) QMessageBox::warning(parent, "Techy-Draw", "Could not write " + file);
+    if (!file.isEmpty() && !exportPdf(s, chosen, file)) QMessageBox::warning(parent, "Techy-Notes", "Could not write " + file);
 }
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
-    app.setOrganizationName("Techy-Draw");
-    app.setApplicationName("Techy-Draw");
+    app.setOrganizationName("Techy-Notes");
+    app.setApplicationName("Techy-Notes");
     QMainWindow w;
-    w.setWindowTitle("Techy-Draw");
+    w.setWindowTitle("Techy-Notes");
     auto canvas = new Canvas;
     w.setCentralWidget(canvas);
     QSettings st;
+    if (st.allKeys().isEmpty()) {   // settings from before the Techy-Draw → Techy-Notes rename
+        QSettings old("Techy-Draw", "Techy-Draw");
+        for (const QString &k : old.allKeys()) st.setValue(k, old.value(k));
+    }
     canvas->eraserButtons = st.value("pen/eraser", canvas->eraserButtons).toInt();
     canvas->menuButtons = st.value("pen/menu", canvas->menuButtons).toInt();
     canvas->pressLow = st.value("pen/low", canvas->pressLow).toFloat();
@@ -442,7 +446,11 @@ int main(int argc, char **argv) {
     tb->addAction("Delete", [=] { canvas->deleteSelection(); })->setShortcut(QKeySequence::Delete);
 
     // ponytail: fixed notebook root, a "choose folder" setting when someone needs another place
-    const QString rootDir = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/Techy-Draw";
+    const QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    QString rootDir = docs + "/Techy-Notes";
+    // Folder from before the Techy-Draw → Techy-Notes rename: move it; if that fails, keep using it (never orphan notebooks)
+    if (!QDir(rootDir).exists() && QDir(docs + "/Techy-Draw").exists() && !QDir().rename(docs + "/Techy-Draw", rootDir))
+        rootDir = docs + "/Techy-Draw";
     if (!QDir(rootDir).exists() || QDir(rootDir).isEmpty()) {
         QDir().mkpath(rootDir + "/Notebook 1");
         saveSheet(Sheet{}, rootDir + "/Notebook 1/Sheet 1" + kExt);
@@ -458,7 +466,7 @@ int main(int argc, char **argv) {
     view->setContextMenuPolicy(Qt::CustomContextMenu);
     view->expandAll();
 
-    auto warn = [&](const QString &msg) { QMessageBox::warning(&w, "Techy-Draw", msg); };
+    auto warn = [&](const QString &msg) { QMessageBox::warning(&w, "Techy-Notes", msg); };
     auto openSheet = [&](const QModelIndex &i) {
         QString p = i.data(PathRole).toString();
         if (p.endsWith(kExt) && p != canvas->path && !canvas->open(p)) warn("Could not open " + p);

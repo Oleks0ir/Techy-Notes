@@ -227,7 +227,7 @@ void drawPage(QPainter &p, const Sheet &s, QPoint c) {
 bool exportPdf(const Sheet &s, const QList<QPoint> &pages, const QString &path) {
     if (pages.isEmpty()) return false;
     QPdfWriter pdf(path);
-    pdf.setCreator("Techy-Draw");
+    pdf.setCreator("Techy-Notes");
     pdf.setPageSize(QPageSize(s.page, QPageSize::Millimeter, {}, QPageSize::ExactMatch));
     pdf.setPageMargins({});
     QPainter p;

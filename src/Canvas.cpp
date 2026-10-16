@@ -77,7 +77,7 @@ void Canvas::save() {
     autosave.stop();
     if (!dirty || path.isEmpty()) return;
     dirty = !saveSheet(sheet, path);
-    if (dirty) QMessageBox::warning(this, "Techy-Draw", "Could not save " + path);
+    if (dirty) QMessageBox::warning(this, "Techy-Notes", "Could not save " + path);
 }
 
 bool Canvas::open(const QString &file) {
@@ -540,7 +540,7 @@ void Canvas::setColor(QColor c) {
     update();
 }
 
-static const char *kStrokesMime = "application/x-techy-draw-strokes";
+static const char *kStrokesMime = "application/x-techy-notes-strokes";
 
 void Canvas::copySelection() {
     if (sel.isEmpty()) return;
@@ -592,7 +592,7 @@ void Canvas::paste(QPointF at) {
 void Canvas::addImage(const QImage &img, QPointF center) {
     if (img.isNull() || active != None) return;
     QString id = storeImage(img);
-    if (id.isEmpty()) return (void)QMessageBox::warning(this, "Techy-Draw", "Could not store the image in " + imageDir);
+    if (id.isEmpty()) return (void)QMessageBox::warning(this, "Techy-Notes", "Could not store the image in " + imageDir);
     QSizeF mm = QSizeF(img.size()) * 25.4 / 96 / devicePixelRatioF();   // about its size on screen
     QSizeF fit = sheet.page * 0.9;
     if (mm.width() > fit.width() || mm.height() > fit.height()) mm.scale(fit, Qt::KeepAspectRatio);
