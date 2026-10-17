@@ -1,6 +1,7 @@
 #pragma once
 #include <QColor>
 #include <QDataStream>
+#include <QHash>
 #include <QImage>
 #include <QList>
 #include <QPoint>
@@ -14,7 +15,7 @@
 
 class QPainter;
 
-inline constexpr qint32 kSheetVersion = 4;   // bump on any format change. 2: images, highlighter, locked. 3: math. 4: link
+inline constexpr qint32 kSheetVersion = 5;   // bump on any format change. 2: images, highlighter, locked. 3: math. 4: link. 5: equations
 inline bool rowMajor(QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); }   // top row first
 
 struct Pt {                                                    // mm, pressure 0..1, ms timestamp
@@ -45,6 +46,7 @@ struct Sheet {
     QSet<QPoint> pages{QPoint(0, 0)};                           // (col,row) cells, may be negative
     QSizeF page{210, 297};                                      // mm, A4 portrait
     QList<QPoint> exportQueue;
+    QHash<quint32, QByteArray> equations;   // per Stroke::link of analysed ink: the math dock's state of that equation (main.cpp)
 
     QPoint cellAt(QPointF p) const { return {qFloor(p.x() / page.width()), qFloor(p.y() / page.height())}; }
     QRectF pageRect(QPoint c) const {

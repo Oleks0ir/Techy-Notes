@@ -33,8 +33,8 @@ target_link_libraries(selftest PRIVATE Qt6::Gui math)
 
 # One-off converter + classifier training, not part of the normal build: cmake --build build --target hwrt2tpl
 # (Ink.cpp compiled in directly: it writes the data the math library embeds)
-qt_add_executable(hwrt2tpl tools/hwrt2tpl.cpp src/Ink.cpp)
-target_link_libraries(hwrt2tpl PRIVATE Qt6::Gui)
+qt_add_executable(hwrt2tpl tools/hwrt2tpl.cpp)
+target_link_libraries(hwrt2tpl PRIVATE Qt6::Gui math)
 set_target_properties(hwrt2tpl PROPERTIES EXCLUDE_FROM_ALL ON)
 
 # Simulated mouse/pen/touch input on the canvas: ./build/inputtest -platform offscreen

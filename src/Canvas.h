@@ -28,7 +28,11 @@ public:
     std::function<void()> onPick;        // after a ring pick: the toolbar shows the new tool/colour
     std::function<void()> onMath;        // pen ring > Math: show/hide the math dock
     std::function<void(const QString &)> onEditMath;   // object menu > Edit: that math object's text, for the dock
-    std::function<void(const QList<QPolygonF> &)> onRecognize;   // selection > Recognize math: its ink (mm, writing order)
+    // selection > Recognize math: its ink becomes (or joins) an analysed equation, the strokes' shared link
+    std::function<void(quint32, const QList<int> &)> onRecognize;   // the link, the lassoed strokes
+    // a finger tap on analysed ink, or the pen ring's Open math over it: that equation's link; 0: a tap elsewhere
+    std::function<void(quint32)> onOpenEquation;
+    std::function<void()> onLeave;       // before another sheet opens: the dock keeps what it shows of this one
 
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
@@ -47,8 +51,15 @@ public:
     // Selected, one undo step. ink 0: at the view centre (plots 80×60 mm, equations 6 mm text); 1: right of the
     // recognized ink, 2: in its place (the ink is removed); equations as tall as that ink. 1/2 need inkValid().
     void insertMath(const QString &math, int ink = 0);
-    bool inkValid() const;                  // the ink last sent to onRecognize is still there, unchanged
+    bool inkValid() const;                  // the ink of useInk is still there, unchanged
     bool updateMath(const QString &math);   // the object last opened with Edit (one undo step); false: it is gone
+    QList<int> equationInk(quint32 link) const;   // the plain ink strokes of that equation, ascending
+    int mathOf(quint32 link) const;               // its inserted math object; -1: none
+    void useInk(quint32 link);                    // the ink Insert places the math by (kept ink stays linked); 0: none
+    void editMath(int i);                         // Update changes math object i
+    void relink(quint32 from, quint32 to);        // the ink of equation from joins equation to (no undo step)
+    // the dock's saved state of an equation (no undo step; empty removes it)
+    void setEquation(quint32 link, const QByteArray &state);
 
 protected:
     bool event(QEvent *e) override;
@@ -116,9 +127,15 @@ private:
     QTransform selXf;          // selection move/resize in progress, world mm
     int mathIdx = -1;          // math object opened with Edit, valid while its text is still mathWas
     QString mathWas;
-    QList<int> inkIdx;         // strokes last sent to onRecognize (ascending) and their content then
+    QList<int> inkIdx;         // strokes of useInk (ascending) and their content then
     QList<Stroke> inkWas;
+    quint32 inkLink = 0;
     quint32 newLink() const;   // an unused Stroke::link id
+    QHash<quint32, QRectF> equations() const;   // analysed ink (with a saved state or an inserted object): its bounds
+    quint32 equationAt(QPointF world) const;    // the smallest of them around that point; 0: none
+    QPointF tapFrom;           // one finger down here, and when (a quick tap on analysed ink opens it)
+    qint64 tapMs = 0;
+    bool tapMoved = false;
 
     QPixmap cache;             // pages + committed ink, rendered at cacheScale/cacheOffset
     double cacheScale = 0;

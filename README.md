@@ -96,9 +96,9 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 | `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs |
 | `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
-| `src/Math.h/.cpp` | Math objects: expression parser, typesetting, `y = f(x)` plots |
+| `src/Math.h/.cpp` | Math objects: expression parser, typesetting (with each glyph's place), `y = f(x)` plots, structure templates |
 | `src/Eval.cpp` | The only ExprTk user (curve evaluation), alone because it takes minutes to compile |
-| `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, symbol classifier (small neural net, last layer retrained on the user's samples), function-name lexicon, layout from geometry; template files |
+| `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, symbol classifier (small neural net, last layer retrained on the user's samples), function-name lexicon, structure checks, layout from geometry; template files, math log + layout fitting, random test formulas |
 | `data/symbols.tpl`, `data/inkmlp.bin` | Built-in symbol samples and trained classifier from HWRT (ODbL, see `data/LICENSE-HWRT.txt`), built in as `:/symbols.tpl`, `:/inkmlp.bin` |
 | `tools/hwrt2tpl.cpp` | One-off: HWRT CSVs → `data/symbols.tpl` + trains `data/inkmlp.bin` (`cmake --build build --target hwrt2tpl`) |
 | `icon.png`, `icon.ico`, `src/app.rc` | App icon: window (`:/icon.png`) and `.exe` (icon.ico = icon.png wrapped, rebuild it when the PNG changes) |
@@ -134,15 +134,19 @@ onto the canvas. Everything stays GPL-3-compatible open source.
 
 **Milestone M1: typed input** (handwriting recognition comes later and only has to fill the text box)
 - **Math dock** (right side; ∑ toolbar button and pen-ring entry): one expression per line, Desmos-style
-  (`y = x^2 - 2x`, `sin(x)/x`, `2x`). Below it: the formatted equations and a live plot, pan/zoom with
-  pen, finger, mouse.
+  (`y = x^2 - 2x`, `sin(x)/x`, `2x`). Below it two panes with a divider: the formatted equations, and a live plot (pan/zoom with
+  pen, finger, mouse; drag the divider down to hide it).
+- **Structure buttons** (Word-style, above the text box): Fraction, Script, Radical, Integral, Large operator,
+  Bracket, Function, Limit, Derivative, Matrix, each a menu of typeset templates. A template goes in at the cursor
+  with empty boxes `□` to fill; selected text goes into the first box, the next box is selected. Tab, or a tap on
+  a box in the preview, selects a box. Text with nothing to plot is inserted as an equation.
 - Plot: several `y = f(x)` curves, one color each, axes + grid + tick numbers.
 - **Insert** places a **math object** at the screen center (80×60 mm), already selected so it can be moved/resized
   right away. Two kinds: plot, equation (typeset).
 - On the canvas the object is non-interactive, drawn as vector from its stored text (crisp in PDF).
   Right-click → **Edit** loads it into the dock; **Update** writes it back (one undo step).
 - Model: like pictures, a `Stroke` whose `pts[0..1]` is the rectangle, plus `QString math` (expressions +
-  view range). Select/move/resize/undo/copy/PDF reuse the picture paths. Sheet format v3.
+  view range). Select/move/resize/undo/copy/PDF reuse the picture paths. Sheet format v3 (v4: kept ink and its object share `Stroke::link`; v5: analysed equations).
 - Parsing: own recursive-descent parser → tree used for typesetting (fractions, powers, roots,
   functions, laid out with `QPainter`). Evaluation for plotting: ExprTk (MIT, vendored header
   `third_party/exprtk.hpp`).
@@ -168,36 +172,67 @@ stroke data with a free license exists (HWRT); whole-expression data does not, s
 
 Decided: **own engine, HWRT seed templates.** Steps:
 1. **Notation (typed first):** Greek names (`alpha` → α, `theta`, …), `int(a, b, f)` / ∫ with limits, `sum`,
-   `lim`, `d/dx`, in the parser and typesetting. Plots only use what ExprTk can evaluate.
+   `lim`, `d/dx`, in the parser and typesetting. Then `prod`, `oint`, `iint … dx dy`, `sqrt[n](x)`, `log_b(x)`,
+   subscripts `x_1`, primes `f'`, `∂/∂t`, `∂` and `∇`, stretched `[ ]` / `{ }`, matrices `[a, b; c, d]` and
+   `(x; y)`, empty boxes `□`. Plots only use what ExprTk can evaluate (roots and log bases do; ∫, ∑, ∏, lim are
+   display only). Parser nodes keep where they were written, so the preview knows which glyph shows which character.
 2. **Templates:** a one-off converter (`tools/`) turns the HWRT CSVs into `data/symbols.tpl` (~100 symbols ×
    ~20 samples, normalized strokes), embedded as a Qt resource; `licenses/HWRT.txt` (ODbL notice + attribution).
 3. **`src/Ink.h/.cpp`:** strokes → symbols (segmentation: the row's most likely split into symbols of up to 4
    consecutive strokes, found by dynamic programming over the classifier's probabilities; strokes with a gap
    between them are never one symbol, crossing ones get a bonus; dots join the symbol they sit above or inside;
-   98% of random close-written 3-letter rows split right, selftest) → classifier (features: 24 points along
+   97% of random close-written 3-letter rows split right, selftest) → classifier (features: 24 points along
    the ink with pen-ups, a 12×12 picture, aspect, stroke count, length → 256 ReLU → softmax; trained on all HWRT
-   samples of our ~80 symbols with random distortion), top candidates with probabilities → function names
-   (`s1n` → `sin`) → layout from geometry (baseline, powers, fraction bar, radical, ∫ limits) →
-   dock text, plus each line's stroke indices (kept for Review). Selftest feeds it ink built from templates.
-4. **UI:** selection menu / pen ring → **Recognize math** → dock: text box (freely editable) + a strip of the
-   recognized symbols; tapping one lists the alternatives, a pick fixes the text and becomes a personal template
+   samples of our 87 symbols with random distortion; HWRT test set 91.8% top-1, 98.4% top-3), top candidates with
+   probabilities → function names (`s1n` → `sin`) → structures checked against what they need (a symbol that could
+   be ∫ / ∑ / ∏ becomes it when the ink around it fits: ∫ tall with `dx` after it or bounds at its ends, ∑ / ∏ with
+   symbols over and under) → layout from geometry (baseline, powers, subscripts, primes, fraction bar, radical and
+   its index; ∫ ∮ ∑ ∏ lim own the smaller symbols over and under them as limits, also when written left of the sign
+   or wider than it; two ∫ side by side are ∬) → dock text, each line's stroke indices (kept for Review) and, per
+   character, the ink symbol it shows. Selftest feeds it ink built from templates.
+4. **UI:** selection menu / pen ring → **Recognize math** → dock: text box (freely editable) + the preview, which
+   is also where corrections happen: tap symbols to frame them, then **Correct** (alternatives, or write it), **Split**
+   (one symbol per stroke) or **Delete**; double-tap rewrites one. A correction becomes a personal template
    (`<notebook root>/.templates.tpl`): the classifier's last layer is retrained on them in well under a second
    (with 5 built-in samples per symbol so the rest is not forgotten); unknown symbols become new classes.
-   Insert asks **Replace ink** / **Keep ink**.
-   Several symbols can be corrected at once (one character each, or one symbol to merge them); double-tap rewrites
-   one, Split cuts a wrongly joined symbol into one per stroke, Delete drops stray ones. Recognized text goes in as new lines under the text box's other functions, and
-   corrections rewrite only those lines. A dot above a symbol joins it (i, j) whenever it was written. Kept ink stays
-   linked to its object: right-click on it → **Edit math**.
-5. **Settings > Calibrate handwriting:** 12 prompts (3 each: basics, letters + Greek, functions, calculus), written
-   in a row. The ink is split into exactly the page's symbols (forced alignment: the same rules as recognition,
-   each part scored by its probability of being the symbol it should be; dots go where they help most; 97% of
+   Typed edits keep their link to the ink (kept characters, one-for-one swaps; retyped runs only with Settings >
+   Lenient matching). Recognized text goes in as new lines, or into the selected `□` (lasso on the page or the
+   **Write** pad under the preview, read again each time the pen rests); corrections rewrite only that range.
+   **Re-read as a structure:** symbols framed in the preview + the ∫ ∑ ∏ lim xⁿ xₙ buttons make them that structure
+   (the sign is relabelled and learned, the rest become its limits or scripts), whatever the geometry says.
+   A dot above a symbol joins it (i, j) whenever it was written.
+   **Insert** asks **Replace ink** / **Keep ink**, then lists what this equation's corrections taught (learned at
+   once; untick to forget one) and the symbols changed by typing (tick to learn; Settings > Learn from inserted math).
+   Each Insert of recognized ink is logged in `<notebook root>/.mathlog` (ink, symbols, first reading, change chain,
+   final text; last 300) and the layout's thresholds (power height, line gap, limit reach, fraction reach) are fitted
+   on the whole log; Settings > Reset layout learning.
+   **Analysed equations:** recognized ink is one equation (its strokes share `Stroke::link`), underlined on screen
+   (not in PDF): wavy orange until inserted, straight blue once inserted with Keep ink. The dock shows one equation
+   at a time; its state (text, symbols, links to the ink, readings, what it taught) is saved in the sheet
+   (`Sheet::equations`, by link) on every change and dropped when its ink is gone. A finger tap on it, or the pen
+   ring's **Open math** over it, opens it again where it was left (strokes found by their first timestamp and point
+   count, so moving is fine; erased ones drop their symbols); a tap elsewhere or **Close** closes it, and the typed
+   text that belongs to no ink comes back. Lassoing it again with more strokes reads only those and adds them.
+5. **Settings > Calibrate handwriting:** 13 prompts (basics, letters + Greek, functions, calculus, ∂ ∏ ∮ { } ∇),
+   written in a row, then 7 formula pages (lim, ∫, ∑, ∏ with limits) that feed the math log. **Test with random
+   formulas** gives endless random nested ones with a score: write the typeset formula, it is read with the personal
+   layout and compared (equal up to grouping parentheses). On formula pages each symbol is framed with its reading
+   and the certainty of what the formula says it is (lined up with the formula); tap symbols in the reading under the
+   pad, then **Correct**, **Split** or **Merge** (learned at once); **Train** learns every symbol as what it should be.
+   On symbol pages the ink is split into exactly the page's symbols (forced alignment: the same rules as recognition,
+   each part scored by its probability of being the symbol it should be; dots go where they help most; 96% of
    random close-written words split exactly right, selftest). After each stroke the page is guessed with what was learned so far; each symbol is framed red
    (wrong or < 50%), yellow (50–90%) or green (≥ 90%), with its guess and certainty under it (certainty: the
    classifier's probability for the expected symbol). **Train** learns all symbols of the page and asks for it
    again; only when all are green does it become **Next**. Skip / Stop testing always work. **Train a symbol**
    (there or in Settings): one symbol alone, its ink kept whole, repeated until green.
 
-**Later:** parameters with sliders, implicit `f(x,y)=0`, parametric/polar.
+**Known limits:** a typed change to structure inside recognized text is lost when a correction rebuilds it; a small
+raised 1 may be read as a prime; Replace ink after several lassos into one formula removes only the last lasso's ink;
+an equation's corrections cover the ink of its last reading (earlier box fills, or pad writing, stay as text); the
+finger tap does not open equations while the finger draws (the pen ring does); no upper-case Latin letters yet.
+
+**Later:** computing ∫, ∑, lim; parameters with sliders, implicit `f(x,y)=0`, parametric/polar; pinch zoom in the preview.
 
 **Future, optional: Review.** A checker for written math: it follows the steps of a derivation (lines in a
 lasso selection, top to bottom) and highlights the first one that does not follow from the one before, plus

@@ -77,11 +77,16 @@ void Canvas::modified() {
 void Canvas::save() {
     autosave.stop();
     if (!dirty || path.isEmpty()) return;
+    QSet<quint32> inked;   // an equation whose ink is gone (Replace ink, erased) is dropped
+    for (const Stroke &s : sheet.strokes)
+        if (s.link && !s.boxed()) inked.insert(s.link);
+    sheet.equations.removeIf([&](const std::pair<const quint32 &, QByteArray &> &e) { return !inked.contains(e.first); });
     dirty = !saveSheet(sheet, path);
     if (dirty) QMessageBox::warning(this, "Techy-Notes", "Could not save " + path);
 }
 
 bool Canvas::open(const QString &file) {
+    if (onLeave) onLeave();
     save();
     if (dirty || active != None) return false;   // never drop unsaved ink
     Sheet s;
@@ -92,8 +97,7 @@ bool Canvas::open(const QString &file) {
     redoStack.clear();
     sel.clear();
     trimIdx = cropIdx = mathIdx = -1;
-    inkIdx.clear();
-    inkWas.clear();
+    useInk(0);
     cacheDirty = true;
     setEnabled(ok);
     update();
@@ -133,6 +137,12 @@ bool Canvas::event(QEvent *e) {
     if (QDateTime::currentMSecsSinceEpoch() - lastPenMs < 500) return true;
     const auto *te = static_cast<QTouchEvent *>(e);
     const auto pts = te->points();
+    // a quick one-finger tap: on analysed ink it opens that equation in the math dock, elsewhere it closes it.
+    // ponytail: not while the finger draws (its tap is a dot); the pen ring's Open math works then
+    if (e->type() == QEvent::TouchBegin && pts.size() == 1) tapFrom = pts[0].position(), tapMs = te->timestamp(), tapMoved = false;
+    else if (pts.size() != 1 || QLineF(pts[0].position(), tapFrom).length() > 10) tapMoved = true;
+    if (te->isEndEvent() && !tapMoved && !holdFired && !fingerDraws && te->timestamp() - tapMs < 400 && onOpenEquation)
+        QTimer::singleShot(0, this, [this, w = toWorld(tapFrom)] { onOpenEquation(equationAt(w)); });
     // one finger held still for 0.5 s, then lifted, opens the page menu. Not while held: once a menu is open,
     // Qt turns the held finger into mouse events, and its lift closed the menu right away.
     if (e->type() == QEvent::TouchBegin && pts.size() == 1) {
@@ -196,6 +206,19 @@ void Canvas::renderCache() {
     for (int i = 0; i < sheet.strokes.size(); ++i)
         if (!sel.contains(i)) shown << sheet.strokes[i];
     drawStrokes(p, shown, QRectF(toWorld({0, 0}), toWorld(QPointF(size().width(), size().height()))));
+    // analysed equations underlined (on screen only): wavy red-orange until inserted, then straight blue
+    const QHash<quint32, QRectF> eqs = equations();
+    for (auto it = eqs.begin(); it != eqs.end(); ++it) {
+        bool inserted = mathOf(it.key()) >= 0;
+        QPen pen(inserted ? QColor(0x1565c0) : QColor(0xe8590c), 2);
+        pen.setCosmetic(true);
+        p.setPen(pen);
+        double y = it->bottom() + 1, a = 2.5 / scale;   // a: the wave's height, 2.5 px
+        QPolygonF line;
+        for (double x = it->left(); x <= it->right() + 0.01; x += inserted ? std::max(it->width(), 0.01) : 3 * a)
+            line << QPointF(x, y + (inserted ? 0 : line.size() % 2 ? a : -a));
+        p.drawPolyline(line);
+    }
     if (active == Pen) drawStroke(p, cur);
 }
 
@@ -615,6 +638,67 @@ quint32 Canvas::newLink() const {
     return m + 1;
 }
 
+QList<int> Canvas::equationInk(quint32 link) const {
+    QList<int> out;
+    for (int i = 0; i < sheet.strokes.size() && link; ++i)
+        if (sheet.strokes[i].link == link && !sheet.strokes[i].boxed()) out << i;
+    return out;
+}
+
+int Canvas::mathOf(quint32 link) const {
+    for (int i = 0; i < sheet.strokes.size() && link; ++i)
+        if (sheet.strokes[i].link == link && !sheet.strokes[i].math.isEmpty()) return i;
+    return -1;
+}
+
+void Canvas::useInk(quint32 link) {
+    inkLink = link;
+    inkIdx = equationInk(link);
+    inkWas.clear();
+    for (int i : inkIdx) inkWas << sheet.strokes[i];
+}
+
+void Canvas::relink(quint32 from, quint32 to) {
+    for (Stroke &s : sheet.strokes)
+        if (s.link == from && from) s.link = to;
+    dirty = cacheDirty = true;
+    autosave.start();
+    update();
+}
+
+void Canvas::editMath(int i) {
+    mathIdx = i;
+    mathWas = i >= 0 ? sheet.strokes[i].math : QString();
+}
+
+void Canvas::setEquation(quint32 link, const QByteArray &state) {
+    if (!link || sheet.equations.value(link) == state) return;
+    bool fresh = !sheet.equations.contains(link);
+    state.isEmpty() ? (void)sheet.equations.remove(link) : (void)(sheet.equations[link] = state);
+    dirty = true;
+    autosave.start();
+    if (fresh || state.isEmpty()) cacheDirty = true, update();   // its underline
+}
+
+QHash<quint32, QRectF> Canvas::equations() const {
+    QHash<quint32, QRectF> out;
+    QSet<quint32> objects;
+    for (const Stroke &s : sheet.strokes)
+        if (s.link && !s.math.isEmpty()) objects.insert(s.link);
+    for (const Stroke &s : sheet.strokes)
+        if (s.link && !s.boxed() && (sheet.equations.contains(s.link) || objects.contains(s.link))) out[s.link] |= bounds(s);
+    return out;
+}
+
+quint32 Canvas::equationAt(QPointF w) const {
+    quint32 best = 0;
+    QRectF bb;
+    const QHash<quint32, QRectF> eqs = equations();
+    for (auto it = eqs.begin(); it != eqs.end(); ++it)
+        if (it->adjusted(-2, -2, 2, 4).contains(w) && (!best || it->width() * it->height() < bb.width() * bb.height())) best = it.key(), bb = *it;
+    return best;
+}
+
 bool Canvas::inkValid() const {
     for (int k = 0; k < inkIdx.size(); ++k)
         if (inkIdx[k] >= sheet.strokes.size() || sheet.strokes[inkIdx[k]].pts != inkWas[k].pts) return false;
@@ -637,13 +721,10 @@ void Canvas::insertMath(const QString &math, int ink) {
               : ink == 2 ? inkBox.topLeft() : inkBox.topRight() + QPointF(5, 0);
     QPointF b = a + QPointF(mm.width(), mm.height());
     QList<Stroke> prev = sheet.strokes;
-    quint32 link = at && ink == 1 ? newLink() : 0;   // kept ink: right-click on it edits the object too
+    quint32 link = at && ink == 1 ? inkLink : 0;   // kept ink: its equation and the object share the link
     if (at && ink == 2)
         for (int k = inkIdx.size() - 1; k >= 0; --k) sheet.strokes.removeAt(inkIdx[k]);
-    if (link)
-        for (int i : inkIdx) sheet.strokes[i].link = link;
-    inkIdx.clear();
-    inkWas.clear();
+    useInk(0);
     sheet.strokes << Stroke{{{float(a.x()), float(a.y()), 1, 0}, {float(b.x()), float(b.y()), 1, 0}}, color, 0, {}, false, math, link};
     pushUndo(prev);
     mathIdx = sheet.strokes.size() - 1;   // Update now changes the new object
@@ -897,22 +978,24 @@ QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
         return {{QChar(0xE8C6), "Cut", [this] { copySelection(); deleteSelection(); }},
                 {QChar(0xE8C8), "Copy", [this] { copySelection(); }},
                 {QChar(0xE74D), "Delete", [this] { deleteSelection(); }},
-                {QChar(0xE8EF), "Recognize math", [this] {   // plain ink only, in writing order
-                     QList<int> idx = sel.values();
-                     std::sort(idx.begin(), idx.end());
-                     inkIdx.clear();
-                     inkWas.clear();
-                     QList<QPolygonF> ink;
-                     for (int i : idx) {
-                         const Stroke &s = sheet.strokes[i];
-                         if (s.boxed() || s.color.alpha() < 255) continue;
-                         inkIdx << i;
-                         inkWas << s;
-                         QPolygonF poly;
-                         for (const Pt &p : s.pts) poly << p.pos();
-                         ink << poly;
-                     }
-                     if (!ink.isEmpty() && onRecognize) onRecognize(ink);
+                {QChar(0xE8EF), "Recognize math", [this] {   // plain ink only; with analysed ink in it: that equation, grown
+                     QList<int> idx;
+                     quint32 link = 0;
+                     for (int i : sel)
+                         if (const Stroke &s = sheet.strokes[i]; !s.boxed() && s.color.alpha() == 255) {
+                             idx << i;
+                             if (s.link && (!link || s.link < link)) link = s.link;
+                         }
+                     std::sort(idx.begin(), idx.end());   // writing order
+                     if (idx.isEmpty() || !onRecognize) return;
+                     if (!link) link = newLink();
+                     QList<Stroke> prev = sheet.strokes;
+                     bool joined = false;
+                     for (int i : idx) joined |= std::exchange(sheet.strokes[i].link, link) != link;
+                     if (joined) pushUndo(prev);
+                     cacheDirty = true;
+                     update();
+                     onRecognize(link, idx);
                  }}};
     auto edit = [this](int i) {
         return MenuItem{QChar(0xE70F), "Edit math", [this, i] {
@@ -921,11 +1004,8 @@ QList<Canvas::MenuItem> Canvas::objectActions(QPointF w) {
                             if (onEditMath) onEditMath(mathWas);
                         }};
     };
-    if (img < 0) {   // handwriting kept next to the math object it was recognized as: edits that object
-        for (int i = sheet.strokes.size() - 1; i >= 0; --i)
-            if (const Stroke &st = sheet.strokes[i]; st.link && !st.boxed() && hits(st, w, 1.5))
-                for (int j = 0; j < sheet.strokes.size(); ++j)
-                    if (sheet.strokes[j].link == st.link && !sheet.strokes[j].math.isEmpty()) return {edit(j)};
+    if (img < 0) {   // analysed handwriting (inserted or not): its equation in the dock
+        if (quint32 l = equationAt(w)) return {{QChar(0xE8EF), "Open math", [this, l] { if (onOpenEquation) onOpenEquation(l); }}};
         return {};
     }
     if (!sheet.strokes[img].math.isEmpty())

@@ -35,7 +35,8 @@ static const QHash<QString, QString> kWanted = [] {
         {"nu", "ν"}, {"pi", "π"}, {"rho", "ρ"}, {"sigma", "σ"}, {"tau", "τ"}, {"varphi", "φ"}, {"phi", "φ"},
         {"chi", "χ"}, {"psi", "ψ"}, {"omega", "ω"}, {"Gamma", "Γ"}, {"Delta", "Δ"}, {"Theta", "Θ"},
         {"Lambda", "Λ"}, {"Phi", "Φ"}, {"Psi", "Ψ"}, {"Omega", "Ω"}, {"cdot", "·"}, {"times", "×"},
-        {"int", "∫"}, {"sum", "∑"}, {"sqrt{}", "√"}, {"infty", "∞"}, {"rightarrow", "→"}};
+        {"int", "∫"}, {"sum", "∑"}, {"sqrt{}", "√"}, {"infty", "∞"}, {"rightarrow", "→"}, {"partial", "∂"},
+        {"prod", "∏"}, {"oint", "∮"}, {"nabla", "∇"}, {"{", "{"}, {"}", "}"}};
     for (auto &[l, s] : named) m["\\" + QString(l)] = QString::fromUtf8(s);
     return m;
 }();

@@ -1,7 +1,10 @@
 #include "Ink.h"
+#include "Math.h"
 #include <QFile>
 #include <QHash>
 #include <QLineF>
+#include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <algorithm>
@@ -443,6 +446,7 @@ QList<InkSymbol> recognizeSymbols(const QList<QPolygonF> &ink, const QList<Templ
     for (int d : loose) out.append({{d}, ink[d].boundingRect(), {"."}, {1}});
     std::sort(out.begin(), out.end(), [](const InkSymbol &a, const InkSymbol &b) { return a.strokes[0] < b.strokes[0]; });
     readWords(out, st.h);
+    readStructures(out);
     return out;
 }
 
@@ -518,11 +522,19 @@ QList<QList<int>> alignSymbols(const QList<QPolygonF> &ink, const QStringList &e
 
 
 namespace {
-// Recursive layout of a set of symbols: left to right, a fraction bar / √ / ∫ / ∑ / lim takes the symbols
+struct Txt {   // text, and per character the symbol it shows (-1: added by the layout)
+    QString s;
+    QList<int> src;
+    Txt &add(const QString &t, int sym = -1) { s += t, src += QList<int>(t.size(), sym); return *this; }
+    Txt &add(const Txt &t) { s += t.s, src += t.src; return *this; }
+};
+// Recursive layout of a set of symbols: left to right, a fraction bar / √ / ∫ / ∑ / ∏ / lim takes the symbols
 // around it, a smaller symbol raised after another is its power.
 struct Layout {
     const QList<InkSymbol> &sy;
-    double h;   // typical symbol height
+    double h;                       // typical symbol height
+    QHash<int, QList<int>> lims;    // the l of each "lim": its l, i, m
+    LayoutKnobs k;
 
     QString label(int i) const {
         QString t = sy[i].cands.value(0);
@@ -532,7 +544,63 @@ struct Layout {
     double height(int i) const { return std::max(box(i).height(), 0.6 * h); }   // flat symbols count as normal size
     bool can(int i, const char *t) const { return sy[i].cands.mid(0, 3).contains(QString::fromUtf8(t)); }
 
-    QString run(QList<int> ids) const {
+    // l, i, m written left to right on one baseline (each among its top 3; an m may read as n); empty: l starts no
+    // "lim". One symbol read as "lim" (written in one go) is its own lim.
+    QList<int> limOf(int l) const {
+        if (label(l) == "lim") return {l};
+        if (!can(l, "l")) return {};
+        QList<int> g{l};
+        double gap = 0.8 * std::max(h, box(l).height());   // a tall l: its letters may be wider apart
+        for (const char *c : {"i", "m"}) {
+            int best = -1;
+            QRectF a = box(g.last());
+            for (int j = 0; j < sy.size(); ++j) {
+                QRectF b = box(j);
+                double overlap = std::min(a.bottom(), b.bottom()) - std::max(a.top(), b.top());
+                if ((can(j, c) || (*c == 'm' && can(j, "n"))) && !g.contains(j) && b.left() > a.center().x() && b.left() - a.right() < gap &&
+                    overlap > 0.3 * std::min(a.height(), b.height()) && (best < 0 || b.left() < box(best).left()))
+                    best = j;
+            }
+            if (best < 0) return {};
+            g << best;
+        }
+        return g;
+    }
+    // 'I' ∫, 'S' ∑ or ∏, 'L' the l of a lim, 0: no operator with limits
+    char opKind(int o) const {
+        QString t = label(o);
+        return t == "∫" || t == "∮" ? 'I' : t == "∑" || t == "∏" ? 'S' : lims.contains(o) ? 'L' : 0;
+    }
+    QRectF opBox(int o) const {
+        QRectF b;
+        for (int j : lims.value(o, {o})) b |= box(j);
+        return b;
+    }
+    // Where symbol i sits for operator o: 1 its upper limit, -1 its lower, 0 neither. A limit is smaller than the
+    // operator, over or under it (∫: at its right end, reaching right of it), not on its line.
+    int zone(int o, int i) const {
+        char op = opKind(o);
+        if (!op) return 0;
+        if (char r = sy[i].role) return sy[i].owner != sy[o].strokes ? 0 : r == 'u' ? 1 : r == 'l' ? -1 : 0;   // set by the user
+        QRectF sb = opBox(o), b = box(i);
+        double u = std::max(h, 0.6 * sb.height());   // reach unit: small limits must not shrink it below the operator
+        if (!op || lims.value(o).contains(i) || b.height() > 0.9 * std::max(sb.height(), h) || b.top() < sb.top() - k.reach * u ||
+            b.bottom() > sb.bottom() + k.reach * u)
+            return 0;
+        bool across = op == 'I' ? b.center().x() > sb.left() - 0.5 * h && b.center().x() < sb.right() + 0.8 * sb.width() + 0.5 * h
+                               : b.right() > sb.left() - 0.3 * h && b.left() < sb.right() + 0.3 * h;
+        if (!across) return 0;
+        if (op == 'L') return b.top() > sb.bottom() - 0.25 * h ? -1 : 0;
+        if (b.bottom() < sb.top() + 0.45 * sb.height() && b.center().y() < sb.top() + 0.3 * sb.height()) return 1;
+        if (b.top() > sb.top() + 0.55 * sb.height() && b.center().y() > sb.bottom() - 0.3 * sb.height()) return -1;
+        return 0;
+    }
+    static Txt group(const Txt &t) {   // a fraction's part: in parentheses unless one number or symbol
+        static const QRegularExpression one("^([0-9.]+|.)$");
+        return one.match(t.s).hasMatch() ? t : Txt().add("(").add(t).add(")");
+    }
+
+    Txt run(QList<int> ids) const {
         std::sort(ids.begin(), ids.end(), [&](int a, int b) { return box(a).left() < box(b).left(); });
         // this run's baseline and symbol height (bars and dots left out), for telling powers apart
         QList<double> bottoms, heights;
@@ -542,8 +610,12 @@ struct Layout {
                 bottoms << (label(i).size() == 1 && kTails.contains(label(i)) ? box(i).top() + 0.6 * box(i).height() : box(i).bottom()),
                     heights << box(i).height();
         double base = median(bottoms), hh = heights.isEmpty() ? h : median(heights);
+        QList<double> onBase;   // the height of what stands on the baseline (scripts aside)
+        for (int k = 0; k < bottoms.size(); ++k)
+            if (std::abs(bottoms[k] - base) < 0.25 * heights[k]) onBase << heights[k];
+        if (!onBase.isEmpty()) hh = median(onBase);
         QSet<int> done;
-        QString out;
+        Txt out;
         int prev = -1;   // last symbol on the baseline (decides "." vs "·")
         auto rest = [&] { QList<int> r; for (int i : ids) if (!done.contains(i)) r << i; return r; };
         auto take = [&](auto pred) { QList<int> r; for (int i : rest()) if (pred(i)) r << i, done.insert(i); return r; };
@@ -551,7 +623,7 @@ struct Layout {
         auto spans = [&](int bar, int i) {   // i sits over or under the bar
             double x = box(i).center().x();
             return i != bar && x > box(bar).left() && x < box(bar).right() &&
-                   std::abs(box(i).center().y() - box(bar).center().y()) < 2.5 * h;
+                   std::abs(box(i).center().y() - box(bar).center().y()) < k.span * h;
         };
         auto isBar = [&](int b) {
             if (!flat(box(b)) || !can(b, "-")) return false;
@@ -559,10 +631,36 @@ struct Layout {
             for (int i : rest()) if (spans(b, i)) (above(b, i) ? up : down) = true;
             return up && down;
         };
+        auto inFraction = [&](int i) {   // over or under a fraction bar: not an operator's limit
+            for (int b : rest()) if (b != i && spans(b, i) && isBar(b)) return true;
+            return false;
+        };
+        auto grow = [&](QList<int> part) {   // a limit wider than where it starts (n→∞): its neighbours in its band
+            for (bool more = !part.isEmpty(); more;) {
+                more = false;
+                QRectF band;
+                for (int i : part) band |= box(i);
+                for (int i : rest()) {
+                    QRectF b = box(i);
+                    if (b.left() < band.right() + 0.5 * h && b.right() > band.left() - 0.5 * h && b.center().y() > band.top() - 0.2 * h &&
+                        b.center().y() < band.bottom() + 0.2 * h && b.height() < 1.5 * std::max(band.height(), 0.5 * h) && !inFraction(i))
+                        part << i, done.insert(i), more = true;
+                }
+            }
+            return part;
+        };
+        auto rootIndex = [&](int root, int i) {   // a small symbol over the hook of √: its index (∛)
+            QRectF rb = box(root), b = box(i);
+            return label(root) == "√" && i != root && b.height() < 0.6 * rb.height() && b.center().x() < rb.left() + 0.3 * rb.width() &&
+                   b.right() < rb.left() + 0.5 * rb.width() && b.bottom() < rb.top() + 0.65 * rb.height() && b.top() > rb.top() - 0.5 * h &&
+                   b.left() > rb.left() - 1.5 * h;
+        };
         while (true) {
             QList<int> r = rest();
             if (r.isEmpty()) break;
             int s = r[0], bar = -1;
+            for (int o : r)   // a limit written left of its operator (a ∫'s lower bound under its tail), a root's index, go with it
+                if (o != s && (zone(o, s) || rootIndex(o, s)) && !inFraction(s)) { s = o; break; }
             for (int b : r)   // the widest fraction bar over the next symbol goes first (a numerator may start left of it)
                 if ((b == s || spans(b, s)) && isBar(b) && (bar < 0 || box(b).width() > box(bar).width())) bar = b;
             if (bar >= 0) s = bar;
@@ -572,55 +670,68 @@ struct Layout {
             if (s == bar) {
                 QList<int> num = take([&](int i) { return spans(s, i) && above(s, i); });
                 QList<int> den = take([&](int i) { return spans(s, i); });
-                out += "(" + run(num) + ")/(" + run(den) + ")";
+                out.add(group(run(num))).add("/", s).add(group(run(den)));
                 prev = s;
                 continue;
             }
             if (t == "√") {
-                out += "sqrt(" + run(take([&](int i) { return sb.contains(box(i).center()) && box(i).center().x() > sb.left() + 0.25 * sb.width(); })) + ")";
+                QList<int> ix = take([&](int i) { return rootIndex(s, i); });
+                out.add("sqrt", s);
+                if (!ix.isEmpty()) out.add("[").add(run(ix)).add("]");
+                out.add("(").add(run(take([&](int i) { return sb.contains(box(i).center()) && box(i).center().x() > sb.left() + 0.25 * sb.width(); }))).add(")");
                 prev = s;
                 continue;
             }
-            bool lim = can(s, "l") && r.size() >= 3 && can(r[1], "i") && can(r[2], "m") && r[0] == s;
-            if (t == "∫" || t == "∑" || lim) {
-                if (lim) done.insert(r[1]), done.insert(r[2]), sb |= box(r[1]) | box(r[2]);
-                double reach = t == "∫" ? 0.8 * sb.width() + 0.5 * h : 0.2 * sb.width();
-                auto near = [&](int i) {
-                    QRectF b = box(i);
-                    return b.center().x() > sb.left() - 0.3 * sb.width() && b.center().x() < sb.right() + reach && b.height() < 0.8 * sb.height() &&
-                           b.top() > sb.top() - 1.5 * h && b.bottom() < sb.bottom() + 1.5 * h;
-                };
-                QList<int> hi = lim ? QList<int>{} : take([&](int i) { return near(i) && box(i).center().y() < sb.top() + 0.3 * sb.height(); });
-                QList<int> lo = take([&](int i) { return near(i) && box(i).center().y() > sb.bottom() - (lim ? 0.0 : 0.3 * sb.height()); });
-                out += lim ? QString("lim") : t == "∫" ? QString("int") : QString("sum");
-                if (!lo.isEmpty()) out += "_(" + run(lo) + ")";
-                if (!hi.isEmpty()) out += "^(" + run(hi) + ")";
-                out += " ";
+            if (char op = opKind(s)) {
+                for (int i : lims.value(s)) done.insert(i);
+                int twin = -1;   // ∫∫: a second ∫ of about the same size right after it is ∬
+                for (int j : rest())
+                    if (t == "∫" && label(j) == "∫" && box(j).left() > sb.center().x() && box(j).left() - sb.right() < 0.6 * h &&
+                        std::min(box(j).bottom(), sb.bottom()) - std::max(box(j).top(), sb.top()) > 0.7 * std::min(box(j).height(), sb.height()))
+                        twin = j;
+                if (twin >= 0) done.insert(twin);
+                QList<int> hi = grow(take([&](int i) { return zone(s, i) == 1 && !inFraction(i); }));
+                QList<int> lo = grow(take([&](int i) { return zone(s, i) == -1 && !inFraction(i); }));
+                if (op == 'L' && lims.value(s).size() == 1) out.add("lim", s);
+                else if (op == 'L') for (int j = 0; j < 3; ++j) out.add(QString("lim")[j], lims.value(s)[j]);   // each letter its own symbol
+                else if (twin >= 0) out.add("i", s).add("int", twin);
+                else out.add(t == "∫" ? "int" : t == "∮" ? "oint" : t == "∑" ? "sum" : "prod", s);
+                if (!lo.isEmpty()) out.add("_(").add(run(lo)).add(")");
+                if (!hi.isEmpty()) out.add("^(").add(run(hi)).add(")");
+                out.add(" ");
                 prev = s;
                 continue;
             }
             if (t == ".") {   // at mid height: a product dot; on the baseline: decimal point
                 bool mid = prev >= 0 && sb.center().y() < box(prev).bottom() - 0.3 * height(prev);
-                out += mid ? "*" : ".";
+                out.add(mid ? "*" : ".", s);
                 continue;
             }
-            out += t;
+            out.add(t, s);
             prev = s;
-            // power: smaller symbols right after it, clearly above the baseline: their centre higher than 0.6 of a
-            // symbol height (an "=" or "-" sits at about 0.45; a y's tail does not matter)
-            QList<int> sup;
+            // scripts: smaller symbols right after it. A power's centre is clearly above the baseline (higher than k.power
+            // (0.6) of a symbol height; an "=" or "-" sits at about 0.45; a y's tail does not matter); a subscript hangs
+            // below the baseline with its top under mid height; a prime is a short raised tick (read as 1, | or /)
+            QList<int> sup, sub;
             double right = sb.right();
             for (int i : rest()) {
                 QRectF b = box(i);
-                if (bottoms.isEmpty() || b.left() > right + 0.6 * h || b.center().y() > base - 0.6 * hh || b.height() > 0.9 * height(s)) break;
-                sup << i;
+                bool forced = (sy[i].role == '^' || sy[i].role == '_') && sy[i].owner == sy[s].strokes;   // set by the user
+                if (!forced && (bottoms.isEmpty() || sy[i].role || b.left() > right + 0.6 * h || b.height() > 0.9 * height(s))) break;
+                bool up = forced ? sy[i].role == '^' : b.center().y() < base - k.power * hh;
+                bool down = forced ? !up : !up && b.height() < 0.8 * height(s) && b.top() > base - 0.5 * height(s) && b.bottom() > base + 0.15 * height(s);
+                if (!up && !down) break;
                 right = std::max(right, b.right());
+                if (!forced && up && sup.isEmpty() && sub.isEmpty() && QStringList{"'", "′", "1", "|", "/"}.contains(label(i)) && b.height() < 0.45 * height(s)) {
+                    out.add("'", i);
+                    done.insert(i);
+                    continue;
+                }
+                (up ? sup : sub) << i;
             }
-            if (!sup.isEmpty()) {
-                for (int i : sup) done.insert(i);
-                QString e = run(sup);
-                out += sup.size() == 1 ? "^" + e : "^(" + e + ")";
-            }
+            for (int i : sup + sub) done.insert(i);
+            if (!sub.isEmpty()) out.add(sub.size() == 1 ? "_" : "_(").add(run(sub)).add(sub.size() == 1 ? "" : ")");
+            if (!sup.isEmpty()) out.add(sup.size() == 1 ? "^" : "^(").add(run(sup)).add(sup.size() == 1 ? "" : ")");
         }
         return out;
     }
@@ -646,26 +757,225 @@ Guess guessSymbol(const QList<QPolygonF> &strokes, const QString &expected, cons
     return {sym, e < 0 ? 0.0 : double(p[e])};
 }
 
-InkText inkLayout(const QList<InkSymbol> &symbols) {
+InkText inkLayout(const QList<InkSymbol> &symbols, const LayoutKnobs &k) {
     QList<double> hs;
     for (const InkSymbol &s : symbols)
         if (!flat(s.box) && s.cands.value(0) != ".") hs << s.box.height();
-    Layout l{symbols, median(hs)};
-    // lines: a gap of more than 0.4 symbol heights starts a new one; bars reach one height up and down,
-    // so a fraction stays one line
-    auto ext = [&](int i) { QRectF b = symbols[i].box; return flat(b) ? b.adjusted(0, -l.h, 0, l.h) : b; };
+    Layout l{symbols, median(hs), {}, k};
+    for (int i = 0; i < symbols.size(); ++i)
+        if (QList<int> g = l.limOf(i); !g.isEmpty()) l.lims[i] = g;
+    // lines: a gap of more than k.lineGap (0.4) symbol heights starts a new one; bars reach one height up and down, an
+    // operator over its limits, so a fraction or a ∑ with its limits stays one line
+    QList<QRectF> exts;
+    for (int i = 0; i < symbols.size(); ++i) {
+        QRectF b = symbols[i].box;
+        exts << (flat(b) ? b.adjusted(0, -l.h, 0, l.h) : b);
+    }
+    for (int o = 0; o < symbols.size(); ++o)
+        for (int i = 0; i < symbols.size(); ++i)
+            if (l.zone(o, i)) exts[o] |= symbols[i].box;
+    auto ext = [&](int i) { return exts[i]; };
     QList<int> order;
     for (int i = 0; i < symbols.size(); ++i) order << i;
     std::sort(order.begin(), order.end(), [&](int a, int b) { return ext(a).top() < ext(b).top(); });
     InkText out;
     double bottom = -1e18;
     for (int i : order) {
-        if (out.lines.isEmpty() || ext(i).top() > bottom + 0.4 * l.h) out.lines.append(QList<int>{});
+        if (out.lines.isEmpty() || ext(i).top() > bottom + k.lineGap * l.h) out.lines.append(QList<int>{});
         out.lines.last() << i;
         bottom = out.lines.last().size() == 1 ? ext(i).bottom() : std::max(bottom, ext(i).bottom());
     }
-    QStringList text;
-    for (const QList<int> &line : out.lines) text << l.run(line);
-    out.text = text.join('\n');
+    Txt all;
+    for (int i = 0; i < out.lines.size(); ++i) all.add(i ? "\n" : "").add(l.run(out.lines[i]));
+    out.text = all.s, out.src = all.src;
     return out;
 }
+
+void readStructures(QList<InkSymbol> &syms) {
+    QList<double> hs;
+    for (const InkSymbol &s : syms)
+        if (!flat(s.box) && s.cands.value(0) != ".") hs << s.box.height();
+    double h = median(hs);
+    auto can = [&](int i, const QString &t, int n) { return syms[i].cands.mid(0, n).contains(t); };
+    for (int o = 0; o < syms.size(); ++o) {
+        QRectF b = syms[o].box;
+        auto around = [&](bool over) {   // a smaller symbol over (under) the ends of o, overlapping it sideways
+            for (int i = 0; i < syms.size(); ++i) {
+                QRectF c = syms[i].box;
+                if (i != o && c.height() < 0.8 * b.height() && c.right() > b.left() - 0.3 * h && c.left() < b.right() + 0.5 * h &&
+                    (over ? c.bottom() < b.top() + 0.3 * b.height() : c.top() > b.bottom() - 0.3 * b.height()))
+                    return true;
+            }
+            return false;
+        };
+        auto dx = [&] {   // "d" and a letter right after it, on o's line, right of o
+            for (int d = 0; d < syms.size(); ++d) {
+                QRectF db = syms[d].box;
+                if (!can(d, "d", 3) || db.left() < b.center().x() || db.bottom() < b.top() || db.top() > b.bottom()) continue;
+                for (int v = 0; v < syms.size(); ++v) {
+                    QRectF vb = syms[v].box;
+                    if (v != d && !syms[v].cands.value(0).isEmpty() && syms[v].cands.value(0)[0].isLetter() && vb.left() > db.center().x() && vb.left() - db.right() < 0.8 * h &&
+                        std::abs(vb.bottom() - db.bottom()) < 0.4 * h)
+                        return true;
+                }
+            }
+            return false;
+        };
+        QString to;
+        if (can(o, "∫", 4) && b.height() > 1.3 * h && (dx() || (around(true) && around(false)))) to = "∫";
+        else if (can(o, "∑", 4) && around(true) && around(false)) to = "∑";
+        else if (can(o, "∏", 4) && around(true) && around(false)) to = "∏";
+        if (to.isEmpty() || syms[o].cands.value(0) == to) continue;
+        qsizetype j = syms[o].cands.indexOf(to);
+        syms[o].cands.move(j, 0);
+        if (j < syms[o].probs.size()) syms[o].probs.move(j, 0);
+    }
+    // lim with a limit under it: its m (read as n) is an m, and the limit has an arrow after its variable: one that
+    // could be →, else a "-" with the head touching it (two symbols) or whatever stands second ("1", "l")
+    auto be = [](InkSymbol &s, const QString &t) {
+        if (qsizetype j = s.cands.indexOf(t); j > 0) s.cands.move(j, 0), j < s.probs.size() ? s.probs.move(j, 0) : void();
+        else if (j < 0) s.cands.prepend(t), s.probs.prepend(s.probs.value(0));
+    };
+    for (int o = 0; o < syms.size(); ++o) {
+        Layout l{syms, h, {}, {}};
+        QList<int> g = l.limOf(o);
+        if (g.isEmpty()) continue;
+        l.lims[o] = g;
+        QList<int> lo;
+        for (int i = 0; i < syms.size(); ++i)
+            if (l.zone(o, i) == -1) lo << i;
+        if (lo.size() < 3) continue;
+        if (g.size() == 3) be(syms[g[2]], "m");
+        std::sort(lo.begin(), lo.end(), [&](int a, int b) { return syms[a].box.left() < syms[b].box.left(); });
+        if (std::any_of(lo.begin(), lo.end(), [&](int i) { return syms[i].cands.value(0) == "→"; })) continue;
+        auto arrow = std::find_if(lo.begin() + 1, lo.end() - 1, [&](int i) { return can(i, "→", 4); });
+        if (arrow != lo.end() - 1) {
+            be(syms[*arrow], "→");
+            continue;
+        }
+        int a = lo[1], b = lo.size() > 3 ? lo[2] : -1;   // shaft and head
+        if (b >= 0 && flat(syms[a].box) && syms[b].box.left() - syms[a].box.right() < 0.3 * h) {
+            syms[a].strokes << syms[b].strokes;
+            std::sort(syms[a].strokes.begin(), syms[a].strokes.end());
+            syms[a].box |= syms[b].box;
+            syms.removeAt(b);
+            if (b < o) --o;
+        }
+        be(syms[a], "→");
+    }
+}
+
+QList<int> carryLinks(const QString &from, const QList<int> &links, const QString &to, bool lenient) {
+    // edit distance, walked back from the end: matches keep their link; each run of changes between two matches
+    // (from[i, ri) replaced by to[j, rj)) is linked as the mode allows
+    const int n = int(from.size()), m = int(to.size());
+    std::vector<int> d(size_t(n + 1) * (m + 1));
+    auto D = [&](int i, int j) -> int & { return d[size_t(i) * (m + 1) + j]; };
+    for (int i = 0; i <= n; ++i) D(i, 0) = i;
+    for (int j = 0; j <= m; ++j) D(0, j) = j;
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= m; ++j)
+            D(i, j) = std::min({D(i - 1, j) + 1, D(i, j - 1) + 1, D(i - 1, j - 1) + (from[i - 1] == to[j - 1] ? 0 : 1)});
+    QList<int> out(m, -1);
+    int i = n, j = m, ri = n, rj = m;
+    auto flush = [&] {
+        int a = ri - i, b = rj - j;
+        if (a == 0 || b == 0 || (!lenient && (a != 1 || b != 1))) return;
+        for (int k = 0; k < b; ++k) out[j + k] = links.value(i + k * a / b, -1);
+    };
+    while (i > 0 || j > 0) {
+        if (i > 0 && j > 0 && from[i - 1] == to[j - 1] && D(i, j) == D(i - 1, j - 1)) {
+            flush();
+            --i, --j;
+            out[j] = links.value(i, -1);
+            ri = i, rj = j;
+        } else if (i > 0 && j > 0 && D(i, j) == D(i - 1, j - 1) + 1) {
+            --i, --j;
+        } else if (i > 0 && D(i, j) == D(i - 1, j) + 1) {
+            --i;
+        } else {
+            --j;
+        }
+    }
+    flush();
+    return out;
+}
+
+static QDataStream &operator<<(QDataStream &d, const InkSymbol &s) { return d << s.strokes << s.box << s.cands; }
+static QDataStream &operator>>(QDataStream &d, InkSymbol &s) { return d >> s.strokes >> s.box >> s.cands; }
+static QDataStream &operator<<(QDataStream &d, const MathLogEntry &e) { return d << e.ink << e.symbols << e.first << e.chain << e.final; }
+static QDataStream &operator>>(QDataStream &d, MathLogEntry &e) { return d >> e.ink >> e.symbols >> e.first >> e.chain >> e.final; }
+
+QList<MathLogEntry> loadMathLog(const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    QByteArray magic;
+    qint32 v = 0;
+    QList<MathLogEntry> log;
+    d >> magic >> v;
+    if (magic != "TML" || v != kMathLogVersion) return {};
+    d >> log;
+    return d.status() == QDataStream::Ok ? log : QList<MathLogEntry>{};
+}
+
+bool saveMathLog(const QList<MathLogEntry> &log, const QString &path) {
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return false;
+    QDataStream d(&f);
+    d.setVersion(QDataStream::Qt_6_0);
+    d << QByteArray("TML") << kMathLogVersion << log;
+    return d.status() == QDataStream::Ok && f.commit();
+}
+
+LayoutKnobs fitLayout(const QList<MathLogEntry> &log) {
+    auto score = [&](const LayoutKnobs &k) {
+        int n = 0;
+        for (const MathLogEntry &e : log) n += sameMath(inkLayout(e.symbols, k).text, e.final);
+        return n;
+    };
+    LayoutKnobs best;
+    int top = score(best);
+    // ponytail: coordinate search over a few values each, twice; a finer search if the log grows large and varied
+    const QList<std::pair<double LayoutKnobs::*, QList<double>>> grid = {
+        {&LayoutKnobs::power, {0.3, 0.4, 0.5, 0.6, 0.7, 0.8}}, {&LayoutKnobs::lineGap, {0.2, 0.3, 0.4, 0.6, 0.8, 1.0}},
+        {&LayoutKnobs::reach, {1.0, 1.5, 2.0, 2.5, 3.0}}, {&LayoutKnobs::span, {1.5, 2.0, 2.5, 3.0, 3.5}}};
+    for (int pass = 0; pass < 2; ++pass)
+        for (const auto &[knob, values] : grid)
+            for (double v : values) {
+                LayoutKnobs k = best;
+                k.*knob = v;
+                if (int s = score(k); s > top) top = s, best = k;
+            }
+    return best;
+}
+
+QString symbolText(const QString &t, const QString &read) {
+    static const QHash<QString, QString> kSigns{{"int", "∫"}, {"sum", "∑"}, {"prod", "∏"}, {"sqrt", "√"}};
+    if (kSigns.contains(t)) return kSigns[t];
+    if (!t.isEmpty() && t == read) return t;   // a word read as one symbol ("lim" written in one go)
+    if ((t == "*" || t == ".") && QStringList{"×", "·", "."}.contains(read)) return read;
+    if (t == "/" && read == "-") return read;   // a fraction bar
+    return t.size() == 1 || (t.size() == 2 && t[0].isHighSurrogate()) ? t : QString();
+}
+
+// kind: 0 lim, 1 ∫, 2 ∑; a nested one is of another kind (no ∫∫ … dt dt)
+static QString randomFormula(QRandomGenerator &r, int depth, int outer) {
+    auto pick = [&](const QStringList &l) { return l[r.bounded(int(l.size()))]; };
+    auto num = [&](int from) { return QString::number(r.bounded(from, 10)); };
+    int kind = r.bounded(2);
+    kind += kind >= outer && outer >= 0;   // one of the two others
+    if (outer < 0) kind = r.bounded(3);
+    QString v = pick({"x", "n", "k", "t"}), a = num(1), b = num(1), c = num(2);   // c: a coefficient, never 1
+    QString e = depth > 0 && r.bounded(3) == 0
+                    ? randomFormula(r, depth - 1, kind)
+                    : pick({v + "^2", c + v, "1/" + v, "(" + v + "+" + a + ")/" + b, v + "^" + c + "+" + b, "sqrt(" + v + ")", c + "/" + v + "^2"});
+    switch (kind) {
+    case 0: return "lim_(" + v + "→" + pick({"0", "∞", a}) + ") " + e;
+    case 1: return "int_(" + pick({"0", a}) + ")^(" + pick({b, "∞"}) + ") " + e + " d" + v;
+    default: return "sum_(" + v + "=" + pick({"0", "1"}) + ")^(" + pick({"∞", b}) + ") " + e;
+    }
+}
+
+QString randomFormula(QRandomGenerator &r, int depth) { return randomFormula(r, depth, -1); }

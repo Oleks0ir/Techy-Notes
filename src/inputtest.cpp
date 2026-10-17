@@ -320,33 +320,44 @@ int main(int argc, char **argv) {
     c.undo();
     CHECK(s.strokes.size() == 1);
 
-    // recognition: selection menu > Recognize math hands over the selected ink; Insert can put the object in its
-    // place (one undo step brings the ink back); once the ink is gone or changed, it inserts at the view centre
-    QList<QPolygonF> sent;
-    c.onRecognize = [&](const QList<QPolygonF> &ink) { sent = ink; };
+    // recognition: selection menu > Recognize math makes the selected ink an equation (its strokes share a link; one
+    // undo step) and hands it over; Insert can put the object in its place (one undo step brings the ink back); once
+    // the ink is gone or changed, it inserts at the view centre
+    quint32 sent = 0;
+    QList<int> sentStrokes;
+    c.onRecognize = [&](quint32 link, const QList<int> &st) { sent = link, sentStrokes = st, c.useInk(link); };   // as the dock does
     c.tool = Canvas::Pen;
     drag({60, 150}, {70, 156});
     qsizetype withInk = s.strokes.size();
     c.tool = Canvas::Rect;
     drag({55, 145}, {75, 160});
     menuPick({65, 153}, "Recognize math");
-    CHECK(sent.size() == 1 && sent[0].size() == s.strokes.last().pts.size() && c.inkValid());
+    CHECK(sent && sentStrokes == QList<int>({int(withInk - 1)}) && s.strokes.last().link == sent && c.equationInk(sent) == sentStrokes &&
+          c.inkValid());
     c.insertMath("eq\nx", 2);
     CHECK(s.strokes.size() == withInk && !s.strokes.last().math.isEmpty() && !c.inkValid());
     c.undo();
-    CHECK(s.strokes.size() == withInk && s.strokes.last().math.isEmpty());
-    // Keep ink: the ink and the object share a link, so right-click on the ink > Edit math opens the object
-    c.tool = Canvas::Rect;
+    CHECK(s.strokes.size() == withInk && s.strokes.last().math.isEmpty() && s.strokes.last().link == sent);
+    // lassoed again: the same equation (no new undo step). Keep ink: the ink and the object share the link; Open math
+    // over the ink (menu, pen ring) opens its equation; its state is saved with the sheet while it has ink
+    quint32 first = sent;
     drag({55, 145}, {75, 160});
     menuPick({65, 153}, "Recognize math");
+    CHECK(sent == first);
     c.insertMath("plot -10 10 -7.5 7.5\ny = x", 1);
-    CHECK(s.strokes.size() == withInk + 1 && s.strokes[withInk - 1].link && s.strokes.last().link == s.strokes[withInk - 1].link);
-    edited.clear();
-    menuPick({65, 153}, "Edit math");
-    CHECK(edited.startsWith("plot") && c.updateMath("plot -10 10 -7.5 7.5\ny = 2x") && s.strokes.last().math.endsWith("2x"));
+    CHECK(s.strokes.size() == withInk + 1 && s.strokes.last().link == sent && c.mathOf(sent) == withInk);
+    quint32 opened = 0;
+    c.onOpenEquation = [&](quint32 l) { opened = l; };
+    menuPick({65, 153}, "Open math");
+    CHECK(opened == sent);
+    c.setEquation(sent, "state");
+    c.save();
+    CHECK(loadSheet(back, c.path) && back.equations.value(sent) == "state");
     c.undo();
     c.undo();
     CHECK(s.strokes.size() == withInk && !s.strokes.last().link);
+    c.save();   // no ink left with that link: its state is dropped
+    CHECK(loadSheet(back, c.path) && back.equations.isEmpty());
     c.undo();
     CHECK(s.strokes.size() == 1);
     c.tool = Canvas::Pen;

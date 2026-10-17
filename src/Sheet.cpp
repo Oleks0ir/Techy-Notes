@@ -132,7 +132,7 @@ bool saveSheet(const Sheet &s, const QString &path) {
     if (!f.open(QIODevice::WriteOnly)) return false;
     QDataStream d(&f);
     d.setVersion(QDataStream::Qt_6_0);
-    d << kSheetVersion << s.strokes << s.pages << s.page << s.exportQueue;
+    d << kSheetVersion << s.strokes << s.pages << s.page << s.exportQueue << s.equations;
     return d.status() == QDataStream::Ok && f.commit();
 }
 
@@ -155,6 +155,7 @@ bool loadSheet(Sheet &s, const QString &path) {
         in.strokes << st;
     }
     d >> in.pages >> in.page >> in.exportQueue;
+    if (version >= 5) d >> in.equations;
     if (d.status() != QDataStream::Ok) return false;
     s = in;
     return true;
