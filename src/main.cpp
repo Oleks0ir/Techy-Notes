@@ -42,8 +42,10 @@
 #include <QStyle>
 #include <QToolBar>
 #include <QTreeView>
+#ifndef Q_OS_ANDROID   // Android keeps one instance itself (and Qt Network would add the INTERNET permission)
 #include <QLocalServer>
 #include <QLocalSocket>
+#endif
 #include <algorithm>
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
@@ -897,6 +899,7 @@ int main(int argc, char **argv) {
     // ponytail: one pipe per user name; two Windows sessions of the same user share it
     const QString pipe = "Techy-Notes-" + qEnvironmentVariable("USERNAME");
     const QString given = app.arguments().size() > 1 ? QFileInfo(app.arguments()[1]).absoluteFilePath() : QString();
+#ifndef Q_OS_ANDROID
     {
         QLocalSocket running;
         running.connectToServer(pipe);
@@ -913,8 +916,10 @@ int main(int argc, char **argv) {
     QLocalServer::removeServer(pipe);   // left over from a crash (not on Windows: pipes go with their process)
     QLocalServer server;
     server.listen(pipe);
+#endif
     QMainWindow w;
     w.setWindowTitle("Techy-Notes");
+    w.menuBar()->setNativeMenuBar(false);   // in the window: Android would move the menus to an options menu with no button
     auto canvas = new Canvas;
     w.setCentralWidget(canvas);
     QSettings st;
@@ -1160,6 +1165,7 @@ int main(int argc, char **argv) {
         if (!hit.isEmpty()) view->setCurrentIndex(hit[0]), openSheet(hit[0]);
         else if (!canvas->open(f)) warn("Could not open " + QDir::toNativeSeparators(f));   // a folder the tree does not show
     };
+#ifndef Q_OS_ANDROID
     QObject::connect(&server, &QLocalServer::newConnection, [&] {   // a second start: to the front, its sheet opened
         QLocalSocket *s = server.nextPendingConnection();
         auto done = [&, s] {   // it has written all and gone
@@ -1173,6 +1179,7 @@ int main(int argc, char **argv) {
         if (s->state() == QLocalSocket::UnconnectedState) done();
         else QObject::connect(s, &QLocalSocket::disconnected, &w, done);
     });
+#endif
     if (!given.isEmpty()) QTimer::singleShot(0, &w, [&] { openFile(given); });   // once the window shows
 
     auto dock = new QDockWidget("Notebooks");
@@ -1944,13 +1951,17 @@ int main(int argc, char **argv) {
                                    "<p>Copyright © 2026 Oleks. Free software under the GNU General Public License, version 3 or "
                                    "later; it comes with ABSOLUTELY NO WARRANTY. Source and releases: "
                                    "<a href=\"https://github.com/Oleks0ir/Techy-Notes\">github.com/Oleks0ir/Techy-Notes</a></p>"
-                                   "<p>Built with Qt %2 (LGPL-3.0, as separate replaceable DLLs) and ExprTk (MIT). Built-in symbol "
-                                   "samples: HWRT by Martin Thoma (ODbL 1.0). License texts: the <i>licenses</i> folder next to the "
-                                   "program.</p>")
+                                   "<p>Built with Qt %2 (LGPL-3.0, as separate replaceable libraries) and ExprTk (MIT). Built-in "
+                                   "symbol samples: HWRT by Martin Thoma (ODbL 1.0). License texts: the <i>licenses</i> folder next "
+                                   "to the program (on Android: inside the app package).</p>")
                                .arg(app.applicationVersion(), qVersion()));
     });
     help->addAction("About Qt...", qApp, &QApplication::aboutQt);
 
+    // Android may end a backgrounded app without exec() returning (Windows never suspends)
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, canvas, [=](Qt::ApplicationState s) {
+        if (s == Qt::ApplicationSuspended) canvas->save();
+    });
     w.resize(1280, 800);
     w.show();
     int rc = app.exec();

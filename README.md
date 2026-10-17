@@ -1,6 +1,6 @@
 # Techy-Notes
 
-A fast, native pen notebook for Windows (Android/iOS later), in the spirit of OneNote — with a
+A fast, native pen notebook for Windows and Android tablets (iPad later), in the spirit of OneNote — with a
 long-term goal of turning handwritten math into formatted equations and plots (Desmos / Matlab /
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
@@ -17,6 +17,11 @@ Notebooks live in `Documents\Techy-Notes` either way, and stay there when the pr
 Until the releases are signed (see Code signing below), Windows SmartScreen may warn about an unknown publisher:
 **More info → Run anyway**.
 
+Android 9 or newer, 64-bit ARM (any current tablet): **`Techy-Notes-<version>-android.apk`**. Open it on the
+tablet and allow installing from that app ("unknown apps") when Android asks; a newer APK installs over it. Notebooks
+live in the app's own storage (they can't be seen from other apps; Sheet > Export PDF makes copies). Uninstalling asks
+whether to keep them.
+
 License: GPL-3.0-or-later ([LICENSE](LICENSE)), Copyright (C) 2026 Oleks. The downloads bundle Qt 6 (LGPL-3.0) and other libraries from
 [MSYS2](https://packages.msys2.org) as separate, replaceable DLLs; their license texts are in `licenses/`, and their
 sources are available from [Qt](https://download.qt.io/official_releases/qt/) and the MSYS2 package pages.
@@ -27,7 +32,19 @@ sources are available from [Qt](https://download.qt.io/official_releases/qt/) an
 2. Merge into `main`, wait for the green build, then push the tag: `git tag vx.y.z && git push origin vx.y.z`
    (the build refuses a tag that differs from the version).
 3. GitHub Actions builds, tests, packs `Techy-Notes/` (windeployqt + MinGW DLLs + license texts), makes the zip and
-   the setup wizard (`tools/installer.nsi.in`, NSIS), signs them when signing is set up, and publishes the release.
+   the setup wizard (`tools/installer.nsi.in`, NSIS), signs them when signing is set up; builds the APK on Linux
+   (official Qt for Android); then publishes the release with all three.
+
+Android release key, once (Git Bash; keep `techy-notes.p12` and its password safe and out of the repo: an update
+installs only over an APK signed with the same key):
+```sh
+openssl req -x509 -newkey rsa:4096 -sha256 -days 10000 -nodes -subj "/CN=Oleks" -keyout k.pem -out c.pem
+openssl pkcs12 -export -inkey k.pem -in c.pem -name techy-notes -out techy-notes.p12   # asks for the password
+base64 -w0 techy-notes.p12 > p12.txt && rm k.pem c.pem
+```
+GitHub > Settings > Secrets and variables > Actions: secret `ANDROID_KEYSTORE_BASE64` = the contents of `p12.txt`
+(then delete it), secret `ANDROID_KEYSTORE_PASSWORD` = the password. Without them builds of `main` sign with a
+throwaway key (test builds) and a tag refuses to release.
 
 ## Code signing policy
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by
@@ -56,6 +73,10 @@ cmake --build build
 ```
 MSVC + official Qt kit also works: `cmake -B build -DCMAKE_PREFIX_PATH="$env:QT_DIR"` (`QT_DIR` noted in `.env`),
 `cmake --build build --config Release`, binaries in `build/Release/`.
+
+Android (arm64): Qt 6.10 for Android + its desktop Qt, JDK 17, Android SDK platform 36 and NDK 27.2.12479018; then
+`qt-cmake -B build-android -DANDROID_SDK_ROOT=... -DANDROID_NDK_ROOT=...` and `cmake --build build-android --target apk`.
+CI does exactly this (`.github/workflows/build.yml`, job `android`).
 
 ## Concepts
 | Term | Meaning |
@@ -153,7 +174,9 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 - Spatial index — when hit-testing shows up in a profile.
 - Stroke smoothing — if pen input looks jaggy.
 - Rotating selections; unreferenced images are never removed from `.images/`.
-- Pen ring on Android/iOS: the hover side-button state comes from a Windows API.
+- Pen ring on Android: the hover side-button state comes from a Windows API; there the ring opens with a finger
+  hold, or a pen button picked in Settings > Calibrate pen.
+- Android: `.tsheet` files don't open from other apps; arm64 only. iPad: needs a Mac or an Apple developer account.
 
 ## Math (in progress)
 Goal: lasso-select a handwritten equation → a **Math dock** shows it formatted and plotted → insert it
