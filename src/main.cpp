@@ -42,7 +42,16 @@
 #include <QStyle>
 #include <QToolBar>
 #include <QTreeView>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <algorithm>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>   // AllowSetForegroundWindow
+#endif
 
 // Notebook tree: folders = notebooks/chapters, .tsheet files = sheets; each item holds its path.
 static const QString kExt = ".tsheet";
@@ -881,7 +890,29 @@ int main(int argc, char **argv) {
     QApplication app(argc, argv);
     app.setOrganizationName("Techy-Notes");
     app.setApplicationName("Techy-Notes");
+    app.setApplicationVersion(TECHY_VERSION);
     app.setWindowIcon(QIcon(":/icon.png"));
+    // One app at a time (two would write the same notebooks): a second start hands the sheet it was given (a .tsheet
+    // double-clicked in Explorer, or none) to the running one, which comes to the front, and quits.
+    // ponytail: one pipe per user name; two Windows sessions of the same user share it
+    const QString pipe = "Techy-Notes-" + qEnvironmentVariable("USERNAME");
+    const QString given = app.arguments().size() > 1 ? QFileInfo(app.arguments()[1]).absoluteFilePath() : QString();
+    {
+        QLocalSocket running;
+        running.connectToServer(pipe);
+        if (running.waitForConnected(500)) {
+#ifdef Q_OS_WIN
+            AllowSetForegroundWindow(ASFW_ANY);   // the started one may bring the running one to the front
+#endif
+            running.write(given.toUtf8());
+            running.waitForBytesWritten(1000);
+            running.disconnectFromServer();
+            return 0;
+        }
+    }
+    QLocalServer::removeServer(pipe);   // left over from a crash (not on Windows: pipes go with their process)
+    QLocalServer server;
+    server.listen(pipe);
     QMainWindow w;
     w.setWindowTitle("Techy-Notes");
     auto canvas = new Canvas;
@@ -1093,6 +1124,56 @@ int main(int argc, char **argv) {
         view->setCurrentIndex(first[0]);
         openSheet(first[0]);
     }
+    // A sheet given at start or by a second start: opened; one outside the notebooks is opened where it is, or
+    // copied into the chapter "Imported" of the notebook in use (the first one if none), as the user picks.
+    auto openFile = [&](QString f) {
+        f = QDir::cleanPath(QFileInfo(f).absoluteFilePath());
+        if (!f.endsWith(kExt, Qt::CaseInsensitive) || !QFileInfo(f).isFile()) return warn("Not a Techy-Notes sheet: " + QDir::toNativeSeparators(f));
+        const QString in = QDir::cleanPath(rootDir) + "/";
+        if (!f.startsWith(in, Qt::CaseInsensitive)) {
+            QMessageBox box(QMessageBox::Question, "Techy-Notes",
+                            QString("\"%1\" is not in your notebooks (%2).").arg(QFileInfo(f).completeBaseName(), QDir::toNativeSeparators(rootDir)),
+                            QMessageBox::NoButton, &w);
+            QAbstractButton *here = box.addButton("Open it where it is", QMessageBox::AcceptRole);
+            QAbstractButton *copy = box.addButton("Copy it into my notebooks", QMessageBox::AcceptRole);
+            box.addButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == here) {
+                view->setCurrentIndex({});
+                if (!canvas->open(f)) warn("Could not open " + QDir::toNativeSeparators(f));
+                return;
+            }
+            if (box.clickedButton() != copy) return;
+            QString rel = canvas->path.startsWith(in) ? canvas->path.mid(in.size()) : QString(), notebook;
+            if (rel.contains('/')) notebook = in + rel.section('/', 0, 0);
+            for (const QString &d : QDir(rootDir).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name))
+                if (notebook.isEmpty() && !d.startsWith('.')) notebook = in + d;
+            if (notebook.isEmpty()) notebook = in + "Notebook 1";
+            QString dir = notebook + "/Imported", base = QFileInfo(f).completeBaseName(), to = dir + "/" + base + kExt;
+            for (int n = 2; QFileInfo::exists(to); ++n) to = dir + "/" + base + QString(" (%1)").arg(n) + kExt;
+            if (!QDir().mkpath(dir) || !QFile::copy(f, to)) return warn("Could not copy it to " + QDir::toNativeSeparators(to));
+            canvas->save();
+            rebuild();
+            f = to;
+        }
+        QModelIndexList hit = model->match(model->index(0, 0), PathRole, f, 1, Qt::MatchFixedString | Qt::MatchRecursive);
+        if (!hit.isEmpty()) view->setCurrentIndex(hit[0]), openSheet(hit[0]);
+        else if (!canvas->open(f)) warn("Could not open " + QDir::toNativeSeparators(f));   // a folder the tree does not show
+    };
+    QObject::connect(&server, &QLocalServer::newConnection, [&] {   // a second start: to the front, its sheet opened
+        QLocalSocket *s = server.nextPendingConnection();
+        auto done = [&, s] {   // it has written all and gone
+            QString f = QString::fromUtf8(s->readAll());
+            s->deleteLater();
+            w.setWindowState((w.windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+            w.raise();
+            w.activateWindow();
+            if (!f.isEmpty()) openFile(f);
+        };
+        if (s->state() == QLocalSocket::UnconnectedState) done();
+        else QObject::connect(s, &QLocalSocket::disconnected, &w, done);
+    });
+    if (!given.isEmpty()) QTimer::singleShot(0, &w, [&] { openFile(given); });   // once the window shows
 
     auto dock = new QDockWidget("Notebooks");
     dock->setFeatures(QDockWidget::NoDockWidgetFeatures);
@@ -1855,6 +1936,20 @@ int main(int argc, char **argv) {
     sigma->setText("∑");
     sigma->setToolTip("Math: type expressions, see them formatted and plotted, insert them");
     tb->addAction(sigma);
+
+    auto help = w.menuBar()->addMenu("Help");
+    help->addAction("About Techy-Notes...", [&] {
+        QMessageBox::about(&w, "About Techy-Notes",
+                           QString("<h3>Techy-Notes %1</h3><p>A fast pen notebook that reads handwritten math.</p>"
+                                   "<p>Copyright © 2026 Oleks. Free software under the GNU General Public License, version 3 or "
+                                   "later; it comes with ABSOLUTELY NO WARRANTY. Source and releases: "
+                                   "<a href=\"https://github.com/Oleks0ir/Techy-Notes\">github.com/Oleks0ir/Techy-Notes</a></p>"
+                                   "<p>Built with Qt %2 (LGPL-3.0, as separate replaceable DLLs) and ExprTk (MIT). Built-in symbol "
+                                   "samples: HWRT by Martin Thoma (ODbL 1.0). License texts: the <i>licenses</i> folder next to the "
+                                   "program.</p>")
+                               .arg(app.applicationVersion(), qVersion()));
+    });
+    help->addAction("About Qt...", qApp, &QApplication::aboutQt);
 
     w.resize(1280, 800);
     w.show();

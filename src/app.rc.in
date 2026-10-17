@@ -1,0 +1,27 @@
+// Windows: the icon of techy-notes.exe (Explorer, shortcuts) and its version (file properties). Configured by CMake.
+// icon.ico is icon.png wrapped as an icon (rebuild it when icon.png changes; the PNG goes in unchanged, Windows reads
+// PNG icons up to 256 px).
+IDI_ICON1 ICON "@CMAKE_SOURCE_DIR@/icon.ico"
+
+1 VERSIONINFO
+FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Oleks"
+            VALUE "FileDescription", "Techy-Notes"
+            VALUE "FileVersion", "@PROJECT_VERSION@"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Oleks, GPL-3.0-or-later"
+            VALUE "OriginalFilename", "techy-notes.exe"
+            VALUE "ProductName", "Techy-Notes"
+            VALUE "ProductVersion", "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

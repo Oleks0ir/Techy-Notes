@@ -5,21 +5,47 @@ long-term goal of turning handwritten math into formatted equations and plots (D
 Derive inspired). See [VISION.md](VISION.md) for the original idea.
 
 ## Download
-Windows 10/11 x64: get `Techy-Notes-<version>-win64.zip` from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases),
-unzip anywhere, run `techy-notes.exe`. Notebooks live in `Documents\Techy-Notes`.
+Windows 10/11 x64, from [Releases](https://github.com/Oleks0ir/Techy-Notes/releases):
+- **`Techy-Notes-<version>-setup.exe`** (recommended): a setup wizard. Install for just you (no administrator
+  needed, into `%LOCALAPPDATA%\Programs\Techy-Notes`) or for everyone (`Program Files`); Start-menu shortcut, an
+  optional desktop shortcut, `.tsheet` files open in Techy-Notes. Uninstall from Windows Settings > Apps; it removes
+  the program only. Running a newer setup updates it in place.
+- **`Techy-Notes-<version>-win64.zip`**: portable, nothing installed. Unzip anywhere, run `techy-notes.exe`.
 
-License: GPL-3.0-or-later ([LICENSE](LICENSE)), Copyright (C) 2026 Oleks. The Windows zip bundles Qt 6 (LGPL-3.0) and other libraries from
+Notebooks live in `Documents\Techy-Notes` either way, and stay there when the program is uninstalled.
+
+Until the releases are signed (see Code signing below), Windows SmartScreen may warn about an unknown publisher:
+**More info → Run anyway**.
+
+License: GPL-3.0-or-later ([LICENSE](LICENSE)), Copyright (C) 2026 Oleks. The downloads bundle Qt 6 (LGPL-3.0) and other libraries from
 [MSYS2](https://packages.msys2.org) as separate, replaceable DLLs; their license texts are in `licenses/`, and their
 sources are available from [Qt](https://download.qt.io/official_releases/qt/) and the MSYS2 package pages.
 
-Releasing: push a tag `v*` (`git tag v0.1.0 && git push origin v0.1.0`); GitHub Actions builds, tests and attaches the zip.
+## Releasing
+1. Set the version in `CMakeLists.txt` (`project(TechyNotes VERSION x.y.z ...)`): it goes into Help > About, the
+   `.exe`'s properties and the installer.
+2. Merge into `main`, wait for the green build, then push the tag: `git tag vx.y.z && git push origin vx.y.z`
+   (the build refuses a tag that differs from the version).
+3. GitHub Actions builds, tests, packs `Techy-Notes/` (windeployqt + MinGW DLLs + license texts), makes the zip and
+   the setup wizard (`tools/installer.nsi.in`, NSIS), signs them when signing is set up, and publishes the release.
+
+## Code signing policy
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) (applied for; until it is granted, releases are unsigned).
+- What is signed: `techy-notes.exe` and the setup wizard of each release, built by GitHub Actions from this
+  repository's tagged source. Nothing else is signed, and nothing built outside that workflow.
+- Committers and reviewers: [Oleks0ir](https://github.com/Oleks0ir). Approver of each signing: Oleks0ir.
+- Privacy: the program sends nothing over the network. It talks to no server; it only uses a local named pipe so a
+  second start hands its file to the running window.
+- Set up (once granted): repository variable `SIGNPATH_ORGANIZATION_ID`, secret `SIGNPATH_API_TOKEN`; SignPath
+  project `Techy-Notes`, signing policy `release-signing`.
 
 ## Stack
 - **C++20 + Qt 6 Widgets + CMake** (MinGW via MSYS2 or MSVC on Windows).
 - No web technologies. Native rendering via `QPainter`, pen input via Windows Ink (`QTabletEvent`).
 
 ## Build
-Toolchain: MSYS2 MinGW64 (`pacman -S mingw-w64-x86_64-{qt6-base,cmake,ninja,gcc}`).
+Toolchain: MSYS2 MinGW64 (`pacman -S mingw-w64-x86_64-{qt6-base,cmake,ninja,gcc}`; `nsis` too for the setup wizard).
 ```powershell
 $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # compiler, CMake, Qt DLLs
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -93,7 +119,7 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 
 | File | Contents |
 |---|---|
-| `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs |
+| `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs, math dock, Help > About; one app at a time (a second start hands its `.tsheet` to the running one) |
 | `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
 | `src/Math.h/.cpp` | Math objects: expression parser, typesetting (with each glyph's place), `y = f(x)` plots, structure templates |
@@ -101,7 +127,8 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 | `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, symbol classifier (small neural net, last layer retrained on the user's samples), function-name lexicon, structure checks, layout from geometry; template files, math log + layout fitting, random test formulas |
 | `data/symbols.tpl`, `data/inkmlp.bin` | Built-in symbol samples and trained classifier from HWRT (ODbL, see `data/LICENSE-HWRT.txt`), built in as `:/symbols.tpl`, `:/inkmlp.bin` |
 | `tools/hwrt2tpl.cpp` | One-off: HWRT CSVs → `data/symbols.tpl` + trains `data/inkmlp.bin` (`cmake --build build --target hwrt2tpl`) |
-| `icon.png`, `icon.ico`, `src/app.rc` | App icon: window (`:/icon.png`) and `.exe` (icon.ico = icon.png wrapped, rebuild it when the PNG changes) |
+| `icon.png`, `icon.ico`, `src/app.rc.in` | App icon: window (`:/icon.png`) and `.exe` (icon.ico = icon.png wrapped, rebuild it when the PNG changes); the `.exe`'s version |
+| `tools/installer.nsi.in`, `tools/uninstall-list.sh` | Setup wizard (NSIS 3, configured by CMake) and the exact list of files its uninstaller removes |
 | `third_party/exprtk.hpp` | [ExprTk](https://github.com/ArashPartow/exprtk) (MIT), vendored |
 | `src/selftest.cpp` | Assert-based checks of the model |
 | `src/inputtest.cpp` | Canvas checks with simulated mouse, pen and touch input |
@@ -128,7 +155,7 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 - Rotating selections; unreferenced images are never removed from `.images/`.
 - Pen ring on Android/iOS: the hover side-button state comes from a Windows API.
 
-## Math (in progress, branch `dev`)
+## Math (in progress)
 Goal: lasso-select a handwritten equation → a **Math dock** shows it formatted and plotted → insert it
 onto the canvas. Everything stays GPL-3-compatible open source.
 

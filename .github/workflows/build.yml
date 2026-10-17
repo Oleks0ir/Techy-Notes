@@ -1,4 +1,6 @@
-# Builds and tests on every push; a pushed tag v* also publishes a GitHub release with the Windows zip.
+# Builds and tests on every push; a pushed tag v* also publishes a GitHub release with the Windows setup wizard and
+# the portable zip. Code signing (SignPath Foundation) runs once the repository variable SIGNPATH_ORGANIZATION_ID and
+# the secret SIGNPATH_API_TOKEN are set; until then the files go out unsigned.
 name: build
 on:
   push:
@@ -20,10 +22,13 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
-          install: zip mingw-w64-x86_64-qt6-base mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc
+          install: zip mingw-w64-x86_64-qt6-base mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: grep -q "^project(TechyNotes VERSION ${GITHUB_REF_NAME#v} " CMakeLists.txt || { echo "tag $GITHUB_REF_NAME, but CMakeLists.txt says otherwise"; exit 1; }
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
       - run: ./build/selftest.exe && timeout 120 ./build/inputtest.exe -platform offscreen
-      - name: Package
+      - name: Deploy
         run: |
           D=Techy-Notes
           mkdir $D $D/licenses && cp build/techy-notes.exe README.md LICENSE $D
@@ -39,13 +44,65 @@ jobs:
           done
           cp /mingw64/share/icu/*/LICENSE $D/licenses/icu.txt
           cp data/LICENSE-HWRT.txt $D/licenses/   # ODbL notice for the built-in symbol templates
-          zip -rq Techy-Notes-${GITHUB_REF_NAME//\//-}-win64.zip $D
+
+      # Signing, step 1: the program itself (it goes into both downloads)
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        id: unsigned-exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: Techy-Notes/techy-notes.exe
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: Techy-Notes
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned-exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        run: cp signed-exe/techy-notes.exe Techy-Notes/
+
+      - name: Package
+        run: |
+          V=${GITHUB_REF_NAME//\//-}
+          zip -rq Techy-Notes-$V-win64.zip Techy-Notes
+          sh tools/uninstall-list.sh Techy-Notes > uninstall-list.nsh   # what the uninstaller removes, exactly
+          makensis -V2 "-DFILES=$(cygpath -w "$PWD/Techy-Notes")" "-DLIST=$(cygpath -w "$PWD/uninstall-list.nsh")" \
+            "-DOUT=$(cygpath -w "$PWD")\\Techy-Notes-$V-setup.exe" "$(cygpath -w "$PWD/build/installer.nsi")"
+
+      # Signing, step 2: the setup wizard
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        id: unsigned-setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-setup
+          path: Techy-Notes-*-setup.exe
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: Techy-Notes
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned-setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+      - if: vars.SIGNPATH_ORGANIZATION_ID != ''
+        run: cp signed-setup/Techy-Notes-*-setup.exe .
+
       - uses: actions/upload-artifact@v4
         with:
           name: Techy-Notes-win64
-          path: Techy-Notes-*-win64.zip
+          path: |
+            Techy-Notes-*-win64.zip
+            Techy-Notes-*-setup.exe
       - if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Techy-Notes-*-win64.zip
+          files: |
+            Techy-Notes-*-setup.exe
+            Techy-Notes-*-win64.zip
           generate_release_notes: true

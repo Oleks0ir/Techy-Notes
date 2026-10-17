@@ -1,3 +1,0 @@
-// Windows: the icon of techy-notes.exe (Explorer, shortcuts). icon.ico is icon.png wrapped as an icon
-// (rebuild it when icon.png changes; the PNG goes in unchanged, Windows reads PNG icons up to 256 px).
-IDI_ICON1 ICON "../icon.ico"

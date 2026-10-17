@@ -1,0 +1,118 @@
+; Techy-Notes setup wizard (NSIS 3, Modern UI 2). CMake configures it into build/installer.nsi (version, paths);
+; build it with: makensis /DFILES=<the deployed program folder> /DLIST=<its file list> /DOUT=<setup.exe> build/installer.nsi
+; LIST: an .nsh with a Delete line per installed file and an RMDir line per folder, deepest first (CI makes it from
+; FILES): the uninstaller removes exactly those, so a folder chosen by mistake (Documents) never loses anything else.
+; Welcome, license, just me / everyone (everyone: administrator), folder, options (desktop shortcut, .tsheet files),
+; install, finish (run it). The uninstaller removes the program only, never the notebooks in Documents.
+Unicode true
+!define APP "Techy-Notes"
+!define VERSION "@PROJECT_VERSION@"
+!define EXE "techy-notes.exe"
+!define UNINST "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
+!ifndef FILES
+  !error "FILES (the deployed program folder) is not set: makensis /DFILES=..."
+!endif
+!ifndef LIST
+  !error "LIST (the uninstall file list) is not set: makensis /DLIST=..."
+!endif
+!ifndef OUT
+  !define OUT "Techy-Notes-${VERSION}-setup.exe"
+!endif
+
+Name "${APP} ${VERSION}"
+OutFile "${OUT}"
+SetCompressor /SOLID lzma
+VIProductVersion "@PROJECT_VERSION@.0"
+VIAddVersionKey ProductName "${APP}"
+VIAddVersionKey ProductVersion "${VERSION}"
+VIAddVersionKey FileVersion "${VERSION}"
+VIAddVersionKey FileDescription "${APP} setup"
+VIAddVersionKey LegalCopyright "Copyright (C) 2026 Oleks, GPL-3.0-or-later"
+
+!define MULTIUSER_EXECUTIONLEVEL Highest   ; administrators may choose Everyone, other accounts install for themselves
+!define MULTIUSER_MUI
+!define MULTIUSER_INSTALLMODE_COMMANDLINE  ; /AllUsers, /CurrentUser (the uninstaller is called with its mode)
+!define MULTIUSER_INSTALLMODE_DEFAULT_CURRENTUSER
+!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_KEY "${UNINST}"
+!define MULTIUSER_INSTALLMODE_DEFAULT_REGISTRY_VALUENAME "InstallMode"
+!define MULTIUSER_INSTALLMODE_INSTDIR "${APP}"   ; Program Files or %LOCALAPPDATA%\Programs
+!define MULTIUSER_INSTALLMODE_INSTDIR_REGISTRY_KEY "${UNINST}"
+!define MULTIUSER_INSTALLMODE_INSTDIR_REGISTRY_VALUENAME "InstallLocation"
+!define MULTIUSER_USE_PROGRAMFILES64
+!include MultiUser.nsh
+!include MUI2.nsh
+!include FileFunc.nsh
+
+!define MUI_ICON "@CMAKE_SOURCE_DIR@\icon.ico"
+!define MUI_UNICON "@CMAKE_SOURCE_DIR@\icon.ico"
+!define MUI_ABORTWARNING
+!define MUI_COMPONENTSPAGE_NODESC
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${EXE}"
+!define MUI_FINISHPAGE_RUN_TEXT "Run ${APP}"
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_LICENSE "@CMAKE_SOURCE_DIR@\LICENSE"
+!insertmacro MULTIUSER_PAGE_INSTALLMODE
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_COMPONENTS
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+Function .onInit
+  !insertmacro MULTIUSER_INIT
+FunctionEnd
+Function un.onInit
+  !insertmacro MULTIUSER_UNINIT
+FunctionEnd
+
+Section "${APP}" SecApp
+  SectionIn RO
+  IfFileExists "$INSTDIR\Uninstall.exe" 0 +2   ; an update: the old version removes its own files first
+  ExecWait '"$INSTDIR\Uninstall.exe" /S /$MultiUser.InstallMode _?=$INSTDIR'
+  SetOutPath "$INSTDIR"
+  File /r "${FILES}\*"
+  WriteUninstaller "$INSTDIR\Uninstall.exe"
+  CreateShortcut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\${EXE}"
+  ; Apps & features (SHCTX: HKLM for everyone, HKCU for just me)
+  WriteRegStr SHCTX "${UNINST}" DisplayName "${APP}"
+  WriteRegStr SHCTX "${UNINST}" DisplayVersion "${VERSION}"
+  WriteRegStr SHCTX "${UNINST}" DisplayIcon "$INSTDIR\${EXE}"
+  WriteRegStr SHCTX "${UNINST}" Publisher "Oleks"
+  WriteRegStr SHCTX "${UNINST}" URLInfoAbout "https://github.com/Oleks0ir/Techy-Notes"
+  WriteRegStr SHCTX "${UNINST}" InstallLocation "$INSTDIR"
+  WriteRegStr SHCTX "${UNINST}" InstallMode $MultiUser.InstallMode
+  WriteRegStr SHCTX "${UNINST}" UninstallString '"$INSTDIR\Uninstall.exe" /$MultiUser.InstallMode'
+  WriteRegStr SHCTX "${UNINST}" QuietUninstallString '"$INSTDIR\Uninstall.exe" /$MultiUser.InstallMode /S'
+  WriteRegDWORD SHCTX "${UNINST}" NoModify 1
+  WriteRegDWORD SHCTX "${UNINST}" NoRepair 1
+  ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+  WriteRegDWORD SHCTX "${UNINST}" EstimatedSize $0
+SectionEnd
+
+Section /o "Desktop shortcut" SecDesktop   ; /o: unticked unless chosen
+  CreateShortcut "$DESKTOP\${APP}.lnk" "$INSTDIR\${EXE}"
+SectionEnd
+
+Section "Open .tsheet files with ${APP}" SecFiles
+  WriteRegStr SHCTX "Software\Classes\.tsheet" "" "TechyNotes.Sheet"
+  WriteRegStr SHCTX "Software\Classes\TechyNotes.Sheet" "" "Techy-Notes sheet"
+  WriteRegStr SHCTX "Software\Classes\TechyNotes.Sheet\DefaultIcon" "" "$INSTDIR\${EXE},0"
+  WriteRegStr SHCTX "Software\Classes\TechyNotes.Sheet\shell\open\command" "" '"$INSTDIR\${EXE}" "%1"'
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'   ; SHCNE_ASSOCCHANGED: Explorer shows it now
+SectionEnd
+
+Section "Uninstall"
+  Delete "$SMPROGRAMS\${APP}.lnk"
+  Delete "$DESKTOP\${APP}.lnk"
+  ReadRegStr $0 SHCTX "Software\Classes\.tsheet" ""
+  StrCmp $0 "TechyNotes.Sheet" 0 +2
+  DeleteRegKey SHCTX "Software\Classes\.tsheet"
+  DeleteRegKey SHCTX "Software\Classes\TechyNotes.Sheet"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  DeleteRegKey SHCTX "${UNINST}"
+  !include "${LIST}"
+  Delete "$INSTDIR\Uninstall.exe"
+  RMDir "$INSTDIR"   ; only if nothing else is in it
+SectionEnd
