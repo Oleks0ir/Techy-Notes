@@ -4,7 +4,8 @@
     android:installLocation="auto"
     android:versionCode="-- %%INSERT_VERSION_CODE%% --"
     android:versionName="-- %%INSERT_VERSION_NAME%% --">
-    <!-- %%INSERT_PERMISSIONS -->
+    <!-- No permissions: Qt Core would ask for INTERNET and WRITE_EXTERNAL_STORAGE; the app uses neither (notebooks
+         live in its own storage, nothing goes over the network). Qt's placeholder for them is left out on purpose. -->
     <!-- %%INSERT_FEATURES -->
     <supports-screens
         android:anyDensity="true"

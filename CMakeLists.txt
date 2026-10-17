@@ -21,7 +21,7 @@ if(WIN32)
     configure_file(tools/installer.nsi.in installer.nsi @ONLY)   # the setup wizard (CI: makensis, see the script)
 endif()
 if(ANDROID)
-    # The APK's package sources, put together in the build tree: Qt's manifest (+ keep-data question on uninstall),
+    # The APK's package sources, put together in the build tree: Qt's manifest (+ keep-data question on uninstall, no permissions),
     # the icon, the license texts (CI adds the LGPL). ponytail: arm64-v8a only (tablets); add ABIs when a device needs one
     set(pkg ${CMAKE_CURRENT_BINARY_DIR}/android)
     file(COPY android/AndroidManifest.xml DESTINATION ${pkg})
