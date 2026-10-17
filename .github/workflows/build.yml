@@ -24,9 +24,9 @@ jobs:
         with:
           msystem: MINGW64
           install: zip mingw-w64-x86_64-qt6-base mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-gcc mingw-w64-x86_64-nsis
-      - name: Tag matches the version
+      - name: Tag matches the version   # v0.2.1, or v0.2.1-beta: a pre-release of 0.2.1
         if: startsWith(github.ref, 'refs/tags/v')
-        run: grep -q "^project(TechyNotes VERSION ${GITHUB_REF_NAME#v} " CMakeLists.txt || { echo "tag $GITHUB_REF_NAME, but CMakeLists.txt says otherwise"; exit 1; }
+        run: grep -q "^project(TechyNotes VERSION $(echo ${GITHUB_REF_NAME#v} | cut -d- -f1) " CMakeLists.txt || { echo "tag $GITHUB_REF_NAME, but CMakeLists.txt says otherwise"; exit 1; }
       - run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build
       - run: ./build/selftest.exe && timeout 120 ./build/inputtest.exe -platform offscreen
       - name: Deploy
@@ -168,3 +168,4 @@ jobs:
             Techy-Notes-*-win64.zip
             Techy-Notes-*-android.apk
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
