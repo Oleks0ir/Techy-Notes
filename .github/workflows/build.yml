@@ -121,7 +121,7 @@ jobs:
           arch: android_arm64_v8a
           cache: true
       # The release key (README, Releasing): updates install only over an APK signed with the same key. Without it,
-      # builds of main get a throwaway key (test builds); a release refuses.
+      # builds of main and pre-release tags (v0.2.1-beta) get a throwaway key (test builds); a release refuses.
       - name: Signing key
         env:
           KS: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
@@ -129,7 +129,7 @@ jobs:
         run: |
           if [ -n "$KS" ]; then
             echo "$KS" | base64 -d > ks.p12 && P=$KS_PASS
-          elif [[ $GITHUB_REF == refs/tags/v* ]]; then
+          elif [[ $GITHUB_REF == refs/tags/v* && $GITHUB_REF_NAME != *-* ]]; then
             echo "::error::set the secrets ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD first (README, Releasing)"; exit 1
           else
             P=throwaway
@@ -168,4 +168,5 @@ jobs:
             Techy-Notes-*-win64.zip
             Techy-Notes-*-android.apk
           generate_release_notes: true
+          body: ${{ contains(github.ref_name, '-') && secrets.ANDROID_KEYSTORE_BASE64 == '' && 'Pre-release for testing. The Android APK is signed with a throwaway key, so a later version will not install over it. Uninstall it first, which deletes its notebooks (Sheet > Export PDF keeps copies).' || '' }}
           prerelease: ${{ contains(github.ref_name, '-') }}

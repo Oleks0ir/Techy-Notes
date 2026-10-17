@@ -30,7 +30,7 @@ sources are available from [Qt](https://download.qt.io/official_releases/qt/) an
 1. Set the version in `CMakeLists.txt` (`project(TechyNotes VERSION x.y.z ...)`): it goes into Help > About, the
    `.exe`'s properties and the installer.
 2. Merge into `main`, wait for the green build, then push the tag: `git tag vx.y.z && git push origin vx.y.z`
-   (the build refuses a tag that differs from the version; a suffix, `vx.y.z-beta`, makes it a pre-release).
+   (the build refuses a tag that differs from the version; a suffix, `vx.y.z-beta`, makes it a pre-release, which without the Android key below gets a throwaway one).
 3. GitHub Actions builds, tests, packs `Techy-Notes/` (windeployqt + MinGW DLLs + license texts), makes the zip and
    the setup wizard (`tools/installer.nsi.in`, NSIS), signs them when signing is set up; builds the APK on Linux
    (official Qt for Android); then publishes the release with all three.
@@ -44,7 +44,7 @@ base64 -w0 techy-notes.p12 > p12.txt && rm k.pem c.pem
 ```
 GitHub > Settings > Secrets and variables > Actions: secret `ANDROID_KEYSTORE_BASE64` = the contents of `p12.txt`
 (then delete it), secret `ANDROID_KEYSTORE_PASSWORD` = the password. Without them builds of `main` sign with a
-throwaway key (test builds) and a tag refuses to release.
+throwaway key (test builds), so do pre-release tags, and a release tag refuses.
 
 ## Code signing policy
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by
