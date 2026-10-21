@@ -44,7 +44,7 @@ base64 -w0 techy-notes.p12 > p12.txt && rm k.pem c.pem
 ```
 GitHub > Settings > Secrets and variables > Actions: secret `ANDROID_KEYSTORE_BASE64` = the contents of `p12.txt`
 (then delete it), secret `ANDROID_KEYSTORE_PASSWORD` = the password. Without them builds of `main` sign with a
-throwaway key (test builds), so do pre-release tags, and a release tag refuses.
+throwaway key (test builds), so do pre-release tags, and a release tag ships Windows only (no APK).
 
 ## Code signing policy
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by
