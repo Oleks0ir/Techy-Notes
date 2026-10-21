@@ -65,12 +65,12 @@ foreach(p MathGraph Recognizer)
     target_link_libraries(techyplugin-${name} PRIVATE techy-core math)
     set_target_properties(techyplugin-${name} PROPERTIES LIBRARY_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:techy-notes>/plugins)   # also with MSVC's Release/
     add_dependencies(techy-notes techyplugin-${name})   # building the app builds them
-    if(ANDROID)   # into the APK's library folder, with the math library they need
-        set_property(TARGET techy-notes APPEND PROPERTY QT_ANDROID_EXTRA_LIBS $<TARGET_FILE:techyplugin-${name}>)
+    if(ANDROID)   # into the APK's library folder, with the math library they need (plain paths: Qt mangles $<TARGET_FILE>)
+        set_property(TARGET techy-notes APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${CMAKE_BINARY_DIR}/plugins/libtechyplugin-${name}.so)
     endif()
 endforeach()
 if(ANDROID)
-    set_property(TARGET techy-notes APPEND PROPERTY QT_ANDROID_EXTRA_LIBS $<TARGET_FILE:math>)
+    set_property(TARGET techy-notes APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${CMAKE_BINARY_DIR}/libmath.so)
 endif()
 
 if(ANDROID)
