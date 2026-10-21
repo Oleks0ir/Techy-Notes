@@ -32,7 +32,7 @@ jobs:
       - name: Deploy
         run: |
           D=Techy-Notes
-          mkdir $D $D/licenses && cp build/techy-notes.exe README.md LICENSE $D
+          mkdir $D $D/licenses && cp build/techy-notes.exe build/*.dll README.md LICENSE $D && cp -r build/plugins $D/   # the core + math DLLs, the plug-ins
           windeployqt6 --release --no-translations --no-system-d3d-compiler --no-system-dxc-compiler --no-opengl-sw \
             --skip-plugin-types tls,networkinformation,generic $D/techy-notes.exe
           # MSYS2's Qt links MinGW DLLs (ICU, harfbuzz, ...) windeployqt doesn't copy; twice for their own deps

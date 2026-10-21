@@ -24,15 +24,17 @@ public:
     int menuButtons = Qt::RightButton;      // right-click: opens menus, does nothing on the canvas yet
     float pressLow = 0, pressHigh = 1;
     bool leftHanded = false;             // Settings: mirrors the pen ring
-    static inline bool penBarrel = false; // pen side button as Windows reports it, also while hovering
+    static TECHY_DATA bool penBarrel;    // pen side button as Windows reports it, also while hovering
     std::function<void()> onPick;        // after a ring pick: the toolbar shows the new tool/colour
-    std::function<void()> onMath;        // pen ring > Math: show/hide the math dock
-    std::function<void(const QString &)> onEditMath;   // object menu > Edit: that math object's text, for the dock
-    // selection > Recognize math: its ink becomes (or joins) an analysed equation, the strokes' shared link
-    std::function<void(quint32, const QList<int> &)> onRecognize;   // the link, the lassoed strokes
-    // a finger tap on analysed ink, or the pen ring's Open math over it: that equation's link; 0: a tap elsewhere
+    // a finger tap on analysed ink: that equation's link; 0: a tap elsewhere
     std::function<void(quint32)> onOpenEquation;
     std::function<void()> onLeave;       // before another sheet opens: the dock keeps what it shows of this one
+    // Plug-ins' menu entries (Plugin.h). color: a swatch
+    struct MenuItem { QChar icon; QString label; std::function<void()> run; QColor color = {}; };
+    QList<MenuItem> ringItems;           // the tools ring, after the tools
+    QList<MenuItem> selectionItems;      // the selection's menu and ring: one per input wired to the selection (Host)
+    // entries for what is at a point: world mm, the topmost unlocked picture or math object there (-1: none)
+    QList<std::function<QList<MenuItem>(QPointF, int)>> objectMenus;
 
     explicit Canvas(QWidget *parent = nullptr);
     void undo();
@@ -60,6 +62,10 @@ public:
     void relink(quint32 from, quint32 to);        // the ink of equation from joins equation to (no undo step)
     // the dock's saved state of an equation (no undo step; empty removes it)
     void setEquation(quint32 link, const QByteArray &state);
+    quint32 equationAt(QPointF world) const;      // the smallest analysed ink around that point; 0: none
+    QList<int> selected() const;                  // the selected strokes, ascending
+    // those strokes share a link: the smallest one they have, else a new one (one undo step if that changed it)
+    quint32 linkInk(const QList<int> &strokes);
 
 protected:
     bool event(QEvent *e) override;
@@ -86,7 +92,6 @@ private:
     void step(QList<QList<Stroke>> &from, QList<QList<Stroke>> &to);   // undo/redo: from's last state back, current onto to
     void modified();             // after any sheet edit: pages/queue follow the ink, autosave
     void hover(QPointF screen);  // shows a "+" on a free page edge near the pointer
-    struct MenuItem { QChar icon; QString label; std::function<void()> run; QColor color = {}; };   // color: a swatch
     QList<MenuItem> objectActions(QPointF world);   // the selection / picture there: its actions; empty: none
     void pageMenu(QPointF screen);   // right-click: object actions, then clear / delete page
     void openRing(QPointF screen);
@@ -132,7 +137,6 @@ private:
     quint32 inkLink = 0;
     quint32 newLink() const;   // an unused Stroke::link id
     QHash<quint32, QRectF> equations() const;   // analysed ink (with a saved state or an inserted object): its bounds
-    quint32 equationAt(QPointF world) const;    // the smallest of them around that point; 0: none
     QPointF tapFrom;           // one finger down here, and when (a quick tap on analysed ink opens it)
     qint64 tapMs = 0;
     bool tapMoved = false;

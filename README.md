@@ -50,7 +50,8 @@ throwaway key (test builds), so do pre-release tags, and a release tag refuses.
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by
 [SignPath Foundation](https://signpath.org) (applied for; until it is granted, releases are unsigned).
 - What is signed: `techy-notes.exe` and the setup wizard of each release, built by GitHub Actions from this
-  repository's tagged source. Nothing else is signed, and nothing built outside that workflow.
+  repository's tagged source. Nothing else is signed (not the program's DLLs and plug-ins), and nothing built outside
+  that workflow.
 - Committers and reviewers: [Oleks0ir](https://github.com/Oleks0ir). Approver of each signing: Oleks0ir.
 - Privacy: the program sends nothing over the network. It talks to no server; it only uses a local named pipe so a
   second start hands its file to the running window.
@@ -138,11 +139,33 @@ struct Sheet  { QList<Stroke> strokes; QSet<QPoint> pages; QSizeF page{210,297};
 - Persistence: `QDataStream` with a format version + `QSaveFile`.
 - Undo: implicitly-shared snapshots of the stroke list.
 
+### Plug-ins
+The core (`techy-core` DLL: canvas, basic writing tools, sheets) knows no math. Everything else is a plug-in: a Qt
+plugin library in `plugins/` next to the program (Android: the APK's library folder), loaded at start
+(`src/Plugin.h`). A plug-in adds its own GUI in `start()` (docks, Settings entries, toolbar actions, pen ring
+entries `Canvas::ringItems`, object menu entries `Canvas::objectMenus`, box objects it draws `objectKinds`) and
+talks to others only through typed **ports**: a wire joins an output to an input of the same type, and `Host::send`
+hands an output's value to every input wired to it (also, later, to inputs wired afterwards). The canvas is a node
+too: its output `selection` (type `ink`); every input wired to it is an entry of the selection's menu and ring.
+**Settings > Plug-ins** is the node view: drag an output onto an input to wire them, tap a wire to remove it, switch
+plug-ins on or off (at the next start). The wiring is saved; a plug-in it does not know yet is wired by type.
+A box object whose plug-in is off or missing stays in the sheet and shows as a grey box.
+
+| Plug-in | Inputs | Outputs |
+|---|---|---|
+| Math graph (`plugins/MathGraph.cpp`): the Math dock, typeset + plotted math objects | | `editor` (`math-editor`): its dock, for plug-ins that work in it |
+| Math recognizer (`plugins/Recognizer.cpp`): handwriting → math text, corrections, calibration | `ink` ("Recognize math"), `editor` (`math-editor`) | |
+
+Plug-ins are built with the program (same compiler and Qt: the interface is C++).
+
 | File | Contents |
 |---|---|
-| `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs, math dock, Help > About; one app at a time (a second start hands its `.tsheet` to the running one) |
-| `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export |
+| `src/main.cpp` | Main window: toolbar, tree dock, full screen, page setup + export dialogs, Help > About, loads the plug-ins; one app at a time (a second start hands its `.tsheet` to the running one) |
+| `src/Sheet.h/.cpp` | Model, page layout/growth, activation + export queue, load/save, PDF export, plug-in object kinds |
 | `src/Canvas.h/.cpp` | Canvas widget: view transform, pen/touch/mouse input, tools, painting |
+| `src/Plugin.h`, `src/Host.cpp` | Plug-in interface and ports; the host: loading, wiring, the node view |
+| `src/MathView.h` | The Math dock's preview and text box, and `MathEditor` (what the `editor` output carries); shared by both math plug-ins |
+| `plugins/MathGraph.cpp`, `plugins/Recognizer.cpp` | The math plug-ins (see above) |
 | `src/Math.h/.cpp` | Math objects: expression parser, typesetting (with each glyph's place), `y = f(x)` plots, structure templates |
 | `src/Eval.cpp` | The only ExprTk user (curve evaluation), alone because it takes minutes to compile |
 | `src/Ink.h/.cpp` | Handwriting → dock text: stroke grouping, symbol classifier (small neural net, last layer retrained on the user's samples), function-name lexicon, structure checks, layout from geometry; template files, math log + layout fitting, random test formulas |

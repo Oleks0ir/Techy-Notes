@@ -1,8 +1,14 @@
 // Canvas input checks with simulated mouse, pen and touch events. Run: ./build/inputtest -platform offscreen
 #undef NDEBUG
-#include "Canvas.h"
+#include "Math.h"
+#include "Plugin.h"
 #include <QApplication>
 #include <QClipboard>
+#include <QDockWidget>
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QPushButton>
+#include <QToolBar>
 #include <QFile>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -16,6 +22,7 @@
 #include <QTemporaryDir>
 #include <cassert>
 #include <cstdio>
+#include <memory>
 #include <QtMath>
 
 static Canvas *cv;
@@ -50,6 +57,15 @@ static void closeMenuIn(int ms) {
     saw = false;
     QTimer::singleShot(ms, [] { if (auto m = QApplication::activePopupWidget()) { saw = true; m->close(); } });
 }
+// Stands in for the Math recognizer plug-in: its ink input, which the selection's "Recognize math" feeds
+struct FakeRecognizer : Plugin {
+    std::function<void(const QList<int> &)> onInk;
+    int unwired = 0;
+    QString name() const override { return "Fake recognizer"; }
+    QList<Port> inputs() const override { return {{"ink", "ink", "Recognize math"}}; }
+    void start(Host &) override {}
+    void receive(const QString &, const QVariant &v) override { v.isValid() ? onInk(v.value<QList<int>>()) : void(++unwired); }
+};
 #define CHECK(x) do { if (!(x)) { std::printf("FAIL line %d: %s\n", __LINE__, #x); return 1; } std::printf("ok: %s\n", #x); } while (0)
 
 int main(int argc, char **argv) {
@@ -258,17 +274,19 @@ int main(int argc, char **argv) {
     CHECK(loadSheet(img, f3) && img.strokes[0].img == s.strokes[0].img && img.strokes[1].color == s.strokes[1].color);
 
     // picture menu (right-click on it): Move selects it, Trim crops it to the next drag, Delete removes it
-    auto menuPick = [&](QPointF mm, const QString &item) {
+    auto menuPick = [&](QPointF mm, const QString &item) {   // false: the menu has no such entry
+        auto found = std::make_shared<bool>(false);
         QTimer::singleShot(100, [=] {
             if (auto m = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
                 for (QAction *a : m->actions())
-                    if (a->text() == item) a->trigger();
+                    if (a->text() == item) a->trigger(), *found = true;
                 m->close();
             }
         });
         QMouseEvent e(QEvent::MouseButtonPress, scr(mm), c.mapToGlobal(scr(mm)), Qt::RightButton, Qt::RightButton, Qt::NoModifier);
         QApplication::sendEvent(&c, &e);   // returns once the menu closed
         idle(600);                          // menu cooldown
+        return *found;
     };
     c.tool = Canvas::Pen;
     QRectF pic = box();
@@ -304,7 +322,11 @@ int main(int argc, char **argv) {
     // math objects: Insert puts a selected 80×60 mm plot at the view centre; right-click > Edit math hands its text
     // to the dock; Update is one undo step, and refuses once the object's text changed under it
     QString edited;
-    c.onEditMath = [&](const QString &m) { edited = m; };
+    objectKinds["eq"] = {{}, mathSize};   // as the Math graph plug-in registers it (sized to its content)
+    c.objectMenus << [&](QPointF, int i) -> QList<Canvas::MenuItem> {   // its Edit math, likewise
+        if (i < 0 || s.strokes[i].math.isEmpty()) return {};
+        return {{QChar(), "Edit math", [&, i] { c.editMath(i), edited = s.strokes[i].math; }}};
+    };
     c.insertMath("plot -10 10 -7.5 7.5\ny = x");
     QRectF mb = bounds(s.strokes.last());
     CHECK(s.strokes.size() == 2 && qAbs(mb.width() - 80) < 0.01 && qAbs(mb.height() - 60) < 0.01);
@@ -323,15 +345,25 @@ int main(int argc, char **argv) {
     // recognition: selection menu > Recognize math makes the selected ink an equation (its strokes share a link; one
     // undo step) and hands it over; Insert can put the object in its place (one undo step brings the ink back); once
     // the ink is gone or changed, it inserts at the view centre
+    // The entry comes from the wiring: a plug-in input of type ink, wired to the canvas's selection by default
     quint32 sent = 0;
     QList<int> sentStrokes;
-    c.onRecognize = [&](quint32 link, const QList<int> &st) { sent = link, sentStrokes = st, c.useInk(link); };   // as the dock does
+    Host host;
+    host.canvas = &c;
+    FakeRecognizer rz;
+    rz.onInk = [&](const QList<int> &st) { sentStrokes = st, sent = c.linkInk(st), c.useInk(sent); };   // as the recognizer does
+    host.add(&rz);
+    host.start();
+    CHECK(host.wires == QList<Host::Wire>({{host.nodes[0], "selection", &rz, "ink"}}));
     c.tool = Canvas::Pen;
     drag({60, 150}, {70, 156});
     qsizetype withInk = s.strokes.size();
     c.tool = Canvas::Rect;
     drag({55, 145}, {75, 160});
-    menuPick({65, 153}, "Recognize math");
+    host.unlink(host.wires[0]);   // unwired: no entry (node view), and the input hears of it
+    CHECK(!menuPick({65, 153}, "Recognize math") && rz.unwired == 1 && host.wires.isEmpty());
+    CHECK(host.link({host.nodes[0], "selection", &rz, "ink"}) && !host.link({host.nodes[0], "selection", &rz, "nope"}));
+    CHECK(menuPick({65, 153}, "Recognize math"));
     CHECK(sent && sentStrokes == QList<int>({int(withInk - 1)}) && s.strokes.last().link == sent && c.equationInk(sent) == sentStrokes &&
           c.inkValid());
     c.insertMath("eq\nx", 2);
@@ -347,7 +379,11 @@ int main(int argc, char **argv) {
     c.insertMath("plot -10 10 -7.5 7.5\ny = x", 1);
     CHECK(s.strokes.size() == withInk + 1 && s.strokes.last().link == sent && c.mathOf(sent) == withInk);
     quint32 opened = 0;
-    c.onOpenEquation = [&](quint32 l) { opened = l; };
+    c.objectMenus << [&](QPointF at, int i) -> QList<Canvas::MenuItem> {   // as the recognizer adds it: over analysed ink
+        quint32 l = i < 0 ? c.equationAt(at) : 0;
+        if (!l) return {};
+        return {{QChar(), "Open math", [&, l] { opened = l; }}};
+    };
     menuPick({65, 153}, "Open math");
     CHECK(opened == sent);
     c.setEquation(sent, "state");
@@ -380,6 +416,7 @@ int main(int argc, char **argv) {
     };
     QPointF at(500, 400);
     qsizetype n = s.strokes.size();
+    c.ringItems << Canvas::MenuItem{QChar(0xE8EF), "Math", [] {}};   // a plug-in's, after the tools (the Math graph's)
     openRingAt(at);
     QPointF eraserItem = onRing(at, 45 + 6.5 * 180 / 11, 100);           // 7th of 11 tool items
     penPx(QEvent::TabletMove, eraserItem, Qt::NoButton);
@@ -396,6 +433,23 @@ int main(int argc, char **argv) {
     openRingAt(at);
     tapAt(at);                                                           // the centre: closes, changes nothing
     CHECK(c.color == QColor("#c62828") && c.tool == Canvas::Pen && s.strokes.size() == n);
+
+    // the real plug-ins (build/plugins): they load, add their GUI and wire by type: the recognizer reads the selection
+    // and works in the Math graph's dock
+    QMainWindow win;
+    Canvas c2;
+    Host real;
+    real.window = &win, real.canvas = &c2, real.settings = win.menuBar()->addMenu("Settings"), real.tools = win.addToolBar("Tools");
+    real.rootDir = tmp.path();
+    real.load(QCoreApplication::applicationDirPath() + "/plugins");
+    real.start();
+    auto node = [&](const QString &name) { return *std::find_if(real.nodes.begin(), real.nodes.end(), [&](Plugin *p) { return p->name() == name; }); };
+    CHECK(real.errors.isEmpty() && real.nodes.size() == 3);
+    CHECK(real.wires.contains({real.nodes[0], "selection", node("Math recognizer"), "ink"}) &&
+          real.wires.contains({node("Math graph"), "editor", node("Math recognizer"), "editor"}));
+    QList<QPushButton *> buttons = win.findChild<QDockWidget *>()->findChildren<QPushButton *>();   // the recognizer's Write is in the dock
+    CHECK(c2.selectionItems.size() == 1 && c2.selectionItems[0].label == "Recognize math" && c2.ringItems.size() == 1 && objectKinds.contains("plot") &&
+          std::any_of(buttons.begin(), buttons.end(), [](QPushButton *b) { return b->text() == "Write"; }));
     std::puts("inputtest ok");
     return 0;
 }

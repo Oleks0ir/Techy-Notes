@@ -11,9 +11,18 @@
 #include <QString>
 #include <QtMath>
 
+#include <functional>
 #include <utility>
 
 class QPainter;
+
+// Data of the core DLL that its users (the app, plug-ins) share: MSVC imports it explicitly (functions are exported
+// by WINDOWS_EXPORT_ALL_SYMBOLS, data has to be imported); MinGW imports it by itself.
+#if defined(_MSC_VER) && !defined(TECHY_CORE)
+#define TECHY_DATA __declspec(dllimport)
+#else
+#define TECHY_DATA
+#endif
 
 inline constexpr qint32 kSheetVersion = 5;   // bump on any format change. 2: images, highlighter, locked. 3: math. 4: link. 5: equations
 inline bool rowMajor(QPoint a, QPoint b) { return std::pair(a.y(), a.x()) < std::pair(b.y(), b.x()); }   // top row first
@@ -24,8 +33,8 @@ struct Pt {                                                    // mm, pressure 0
     bool operator==(const Pt &) const = default;
 };
 // A line is a 2-point stroke. color alpha < 255: highlighter (drawn under the ink, no pressure).
-// img or math set: a box object filling the rectangle pts[0]..pts[1] (an image from the store, or a math
-// object drawn from its text, see drawMath); selected, moved, undone like ink, never erased.
+// img or math set: a box object filling the rectangle pts[0]..pts[1] (an image from the store, or a plug-in's
+// object drawn from its text, see objectKinds); selected, moved, undone like ink, never erased.
 struct Stroke {
     QList<Pt> pts; QColor color; float width;
     QString img;          // image id (imageOf), empty for ink
@@ -37,9 +46,20 @@ struct Stroke {
 
 // Notebook-wide image store, <notebook root>/.images/<id>.png; set at startup.
 // ponytail: images are never deleted from the store; collect unreferenced ones if the folder grows too big
-inline QString imageDir;
+extern TECHY_DATA QString imageDir;
 QString storeImage(const QImage &img);   // writes it once (id = content hash); empty: failed
 QImage imageOf(const QString &id);       // cached decode; null if missing
+
+// Box objects of plug-ins, by the first word of Stroke::math ("plot", "eq"): how one is drawn into its rectangle
+// (painter in mm, pen = its colour) and, for kinds that size to their content, that size at font size 1 (empty:
+// nothing to show; no size: 80×60 mm). A kind no plug-in registered draws as a grey box.
+// ponytail: "math" names kept for every kind, to spare a format change
+struct ObjectKind {
+    std::function<void(QPainter &, const QString &, const QRectF &)> draw;
+    std::function<QSizeF(const QString &)> size;
+};
+extern TECHY_DATA QHash<QString, ObjectKind> objectKinds;
+inline QString kindOf(const QString &math) { return math.section('\n', 0, 0).section(' ', 0, 0); }
 
 struct Sheet {
     QList<Stroke> strokes;

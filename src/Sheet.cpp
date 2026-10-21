@@ -1,5 +1,4 @@
 #include "Sheet.h"
-#include "Math.h"
 #include <QBuffer>
 #include <QCache>
 #include <QCryptographicHash>
@@ -13,6 +12,9 @@
 
 // Calibration knob: share of the preset width drawn at zero pressure.
 static constexpr float kMinPressureWidth = 0.2f;
+
+QString imageDir;
+QHash<QString, ObjectKind> objectKinds;
 
 static double segDist(QPointF p, QPointF a, QPointF b) {
     QPointF ab = b - a;
@@ -94,9 +96,22 @@ void drawStroke(QPainter &p, const Stroke &s) {
         else p.drawImage(r, img);
         p.restore();
     } else if (!s.math.isEmpty()) {
+        QRectF r = bounds(s);
         p.save();
         p.setPen(s.color);
-        drawMath(p, s.math, bounds(s));
+        if (auto k = objectKinds.value(kindOf(s.math)); k.draw) {
+            k.draw(p, s.math, r);
+        } else {   // its plug-in is off or missing: kept, and drawn again once it is back
+            p.fillRect(r, QColor(0xe0, 0xe0, 0xe0));
+            p.translate(r.topLeft());
+            p.scale(0.3, 0.3);   // 10 px text: 3 mm
+            QFont f;
+            f.setPixelSize(10);
+            p.setFont(f);
+            p.setPen(Qt::darkGray);
+            p.drawText(QRectF(0, 0, r.width() / 0.3, r.height() / 0.3), Qt::AlignCenter | Qt::TextWordWrap,
+                       "\"" + kindOf(s.math) + "\" needs its plug-in");
+        }
         p.restore();
     } else if (s.color.alpha() < 255) {   // highlighter: one path, so overlapping segments don't darken
         QPolygonF poly;

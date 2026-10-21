@@ -539,10 +539,14 @@ int main(int argc, char **argv) {
     g.strokes = {eqObj, {{{0, 40, 1, 0}, {100, 100, 1, 0}}, Qt::black, 0, {}, false, "plot -10 10 -10 10\ny = x"}};
     assert(saveSheet(g, tmp.filePath("m.tsheet")) && loadSheet(ld, tmp.filePath("m.tsheet")) && ld.strokes[0].math == eqObj.math && ld.strokes[0].link == 5 &&
            ld.strokes[1].math.startsWith("plot"));
+    objectKinds["eq"] = {[](QPainter &p, const QString &m, const QRectF &r) { drawMath(p, m, r); }, mathSize};   // as the Math graph plug-in does
     QImage ms = snapshot(g.strokes, QRectF(0, 0, 100, 100));
     bool blue = false;
     for (int y = 10 * 6; y < 30 * 6; ++y)
         for (int x = 10 * 6; x < 50 * 6; ++x) blue |= ms.pixelColor(x, y).blue() > ms.pixelColor(x, y).red() + 100;
     assert(blue);
+    // a kind no plug-in registered (it is off or missing): a grey box, the object kept
+    g.strokes = {{{{10, 10, 1, 0}, {50, 30, 1, 0}}, Qt::blue, 0, {}, false, "nope\n1"}};
+    assert(snapshot(g.strokes, QRectF(0, 0, 100, 100)).pixelColor(12 * 6, 12 * 6) == QColor(0xe0, 0xe0, 0xe0));
     std::puts("selftest ok");
 }
